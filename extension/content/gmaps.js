@@ -18,10 +18,16 @@
   avatarBtn.className = 'walk3d-toggle';
   avatarBtn.title = 'ストリートビューにアバターを表示する';
 
-  bar.append(avatarBtn, walkBtn);
+  // 吹き出しのおしゃべりの ON/OFF(3Dマップのパネルと同じ設定)
+  const talkBtn = document.createElement('button');
+  talkBtn.type = 'button';
+  talkBtn.className = 'walk3d-talk';
+
+  bar.append(avatarBtn, talkBtn, walkBtn);
   document.documentElement.appendChild(bar);
 
   let enabled = true;
+  let talk = true;
   let modelKey = 'girl';
   let sv = null; // 読み込んだストリートビュー用モジュール
   let loading = null;
@@ -57,6 +63,9 @@
     avatarBtn.innerHTML = `<span class="walk3d-icon">👧</span><span>アバター ${enabled ? 'ON' : 'OFF'}</span>${dot}`;
     avatarBtn.classList.toggle('off', !enabled);
     avatarBtn.title = STATUS_TITLE[depthStatus] + (depthStatus === 'error' && depthMessage ? `\n${depthMessage}` : '');
+    talkBtn.innerHTML = '<span class="walk3d-icon">💬</span>';
+    talkBtn.classList.toggle('off', !talk);
+    talkBtn.title = talk ? 'おしゃべり ON(吹き出しで話しかけます)' : 'おしゃべり OFF';
   }
 
   function onStatus(status, message = '') {
@@ -75,6 +84,7 @@
     if (sv) return sv;
     if (!loading) loading = import(chrome.runtime.getURL('build/streetview.js'));
     sv = await loading;
+    sv.setTalk(talk);
     return sv;
   }
 
@@ -94,6 +104,13 @@
     }
   }
 
+  talkBtn.addEventListener('click', () => {
+    talk = !talk;
+    chrome.storage.local.set({ talk });
+    sv?.setTalk(talk);
+    render();
+  });
+
   avatarBtn.addEventListener('click', () => {
     enabled = !enabled;
     chrome.storage.local.set({ svAvatar: enabled });
@@ -103,9 +120,10 @@
   });
 
   chrome.storage.local
-    .get(['svAvatar', 'walkState'])
-    .then(({ svAvatar, walkState }) => {
+    .get(['svAvatar', 'walkState', 'talk'])
+    .then(({ svAvatar, walkState, talk: savedTalk }) => {
       enabled = svAvatar !== false;
+      talk = savedTalk !== false;
       if (walkState?.model) modelKey = walkState.model;
     })
     .finally(() => {
@@ -116,6 +134,11 @@
       setInterval(check, 250);
     });
   chrome.storage.onChanged.addListener((changes) => {
+    if (changes.talk) {
+      talk = changes.talk.newValue !== false;
+      sv?.setTalk(talk);
+      render();
+    }
     const next = changes.walkState?.newValue?.model;
     if (next && next !== modelKey) {
       modelKey = next;

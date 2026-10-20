@@ -6,10 +6,10 @@ import * as THREE from 'three';
 
 const EMOTE_DURATION = {
   jump: 0.9, wave: 2.4, thumbsup: 1.8,
-  peace: 2.6, bow: 2.6, spin: 1.3, lookaround: 3.4, stretch: 2.6,
+  peace: 2.6, bow: 2.6, spin: 1.3, lookaround: 3.4, stretch: 2.6, beckon: 2.6,
 };
 // こちら(カメラ側)を向いてから行うエモート。ふだんは後ろ姿なので、振り返って見せる
-const FACE_CAMERA = new Set(['peace', 'bow']);
+const FACE_CAMERA = new Set(['peace', 'bow', 'beckon']);
 // しばらく立ち止まっていると、自分から行う動き
 const IDLE_EMOTES = ['lookaround', 'stretch'];
 
@@ -50,6 +50,20 @@ export class VrmAnimator {
     this.nextIdleEmote = 10 + Math.random() * 8;
     this.sitting = false; // 椅子に座っている(座ろうとしている)
     this.sitWeight = 0; // 0=立っている 1=座っている
+    this.look = null; // 振り返る・何かを見る向き { yaw, pitch }(体の正面から、+yaw は左)[rad]
+    this.lookWeight = 0;
+    this.lookYaw = 0;
+    this.lookPitch = 0;
+    this.talking = false; // おしゃべり中は口を動かす
+  }
+
+  // 体の正面から yaw だけ横(+ は左)を見る。後ろを見るときは腰・胸・首に分けて回す
+  lookAt(yaw, pitch = 0) {
+    this.look = { yaw: Math.max(-1.9, Math.min(1.9, yaw)), pitch };
+  }
+
+  stopLooking() {
+    this.look = null;
   }
 
   estimateLegLength() {
@@ -138,6 +152,13 @@ export class VrmAnimator {
         this.idleTime = 0;
         this.nextIdleEmote = 12 + Math.random() * 10;
       }
+    }
+
+    // 見る向きへゆっくり振り向く
+    this.lookWeight += ((this.look ? 1 : 0) - this.lookWeight) * Math.min(1, dt * 5);
+    if (this.look) {
+      this.lookYaw += (this.look.yaw - this.lookYaw) * Math.min(1, dt * 6);
+      this.lookPitch += (this.look.pitch - this.lookPitch) * Math.min(1, dt * 6);
     }
 
     this.pose(dt);
@@ -274,6 +295,18 @@ export class VrmAnimator {
           headRot = mix(headRot, [0.25 * dip, 0, 0], w);
           break;
         }
+        case 'beckon': {
+          // 振り返って「こっちこっち」。手のひらを下にして、ひじから先をぱたぱた
+          const w = this.poseWeight(et, 0.35);
+          const flap = Math.sin(et * 11);
+          rArm = mix(rArm, [-1.15, 0, 0.6], w);
+          rFore = mix(rFore, [0, 0.55 + flap * 0.45, 0], w);
+          rHand = mix(rHand, [0, 0, -0.3 + flap * 0.35], w);
+          lArm = mix(lArm, [0.05, 0, -1.2], w);
+          headRot = mix(headRot, [0.04, 0, 0.14], w);
+          spineRot = mix(spineRot, [0.08, 0, 0], w);
+          break;
+        }
         case 'spin': {
           // くるっと一回転
           const turn = smooth(Math.min(1, et / EMOTE_DURATION.spin));
@@ -335,6 +368,17 @@ export class VrmAnimator {
       rFore = mix(rFore, [0, 0.75, 0], sw);
       this.lift *= 1 - sw;
     }
+
+    // --- 振り返る・何かを見る(エモート中はしない。座っているときは腰は回さない) ---
+    const lkw = this.lookWeight * (1 - ew);
+    if (lkw > 0.001) {
+      const y = this.lookYaw * lkw;
+      hipsRot[1] += y * 0.15 * (1 - sw);
+      spineRot[1] += y * 0.12;
+      chestRot[1] += y * 0.2;
+      headRot[1] += y * 0.53;
+      headRot[0] -= this.lookPitch * lkw;
+    }
     // 振り返るエモートは、体ごとカメラのほうを向く
     if (FACE_CAMERA.has(this.emote)) hipsRot[1] += Math.PI * this.poseWeight(et, 0);
     hipsRot[1] += this.spin;
@@ -392,14 +436,16 @@ export class VrmAnimator {
       if (x >= 1) this.blinkTime = -1;
     }
     // ふだんはほほえみ、エモート中は満面の笑み
-    const happyTarget = this.emote && !IDLE_EMOTES.includes(this.emote) ? 1 : this.sitting ? 0.6 : 0.3;
+    const happyTarget = this.emote && !IDLE_EMOTES.includes(this.emote) ? 1 : this.sitting || this.look ? 0.6 : 0.3;
     const prev = em.getValue('happy') ?? 0;
     const happy = lerp(prev, happyTarget, Math.min(1, dt * 6));
     em.setValue('happy', happy);
     // happy は目を細めるので、まばたきは残りの分だけ
     em.setValue('blink', blink * (1 - happy));
     em.setValue('blinkLeft', this.emote === 'peace' ? this.poseWeight(this.emoteTime, 0.35) : 0);
-    em.setValue('aa', this.emote === 'wave' || this.emote === 'thumbsup' ? 0.3 * this.emoteWeight : 0);
+    // 口: おしゃべり中はぱくぱく、手を振る・よろこぶときは少し開ける
+    const chat = this.talking ? 0.35 * Math.abs(Math.sin(this.time * 13)) * (0.6 + 0.4 * Math.sin(this.time * 3.1)) : 0;
+    em.setValue('aa', Math.max(chat, this.emote === 'wave' || this.emote === 'thumbsup' ? 0.3 * this.emoteWeight : 0));
   }
 }
 

@@ -83,7 +83,22 @@ self.estimateDepth = async (dataUrl) => {
   return res.depth;
 };
 
+// いる場所の住所(〇〇町・〇〇区など)。アバターが「〇〇に来たね」と話すのに使う。
+// Nominatim は 1 秒に 1 回までなので、呼ぶ側で 200m 以上動いたときだけ、間をあけて呼んでいる
+async function reverseGeocode(lat, lng, lang) {
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=16&accept-language=${encodeURIComponent(lang || navigator.language || 'ja')}&lat=${lat}&lon=${lng}`;
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new Error(`reverse geocoding failed: ${res.status}`);
+  return (await res.json()).address || null;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === 'reverse-geocode') {
+    reverseGeocode(msg.lat, msg.lng, msg.lang)
+      .then((address) => sendResponse({ address }))
+      .catch((e) => sendResponse({ error: String(e?.message || e) }));
+    return true;
+  }
   if (msg?.type === 'sv-capture') {
     chrome.tabs
       .captureVisibleTab(sender.tab.windowId, { format: 'jpeg', quality: 75 })

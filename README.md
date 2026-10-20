@@ -21,14 +21,30 @@ Googleマップのような3Dの街並み(立体の建物)を、3Dモデルの�
   - 場所を選んでいるときはその場所から、ストリートビュー中はいま見ている場所と向きから歩き始めます。
 - 前回歩いていた場所と、歩いた距離は保存されます。
 
+### 一緒にお散歩(おしゃべり・振り返り・手招き)
+
+3Dマップでもストリートビューでも、アバターが一緒にお散歩している感じで話しかけてきます。
+
+- 頭の上に吹き出しが出て、話しかけてきます(話しているあいだは口が動き、こちらを振り向きます)
+  - はじめに時間帯のあいさつ(「おはよう!今日はどこまで歩く?」など)
+  - 地名が変わったら「〇〇に来たね!」(約200m 歩くごとに調べます)
+  - 一緒に歩いた距離が 100m・300m・500m・1km… を越えたら「もう500mも歩いたね!」
+  - 歩き出したとき、椅子に座ったとき、モーションのキーを押したときなど
+  - ストリートビューで、写真に犬・猫・鳥・馬・バス・電車・船・自転車が写っていたら、そちらを見て話題にします
+- 歩いているあいだ、ときどき振り返って「ついてきてる?」とこちらを見ます。歩き終わったときも振り返ります
+- 25秒ほど立ち止まったままでいると、振り返って「こっちこっち!」と手招きします(9 キーでもできます)
+- ストリートビューでは、画面の少し右を一歩先に歩きます。すばやく何度も進むと、走ってついてきます
+- 吹き出しは、ストリートビューの「💬」ボタンか、3Dマップのパネルの「おしゃべり」で ON/OFF できます(両方で同じ設定です)
+- 地名を調べるため、いる場所の座標を OpenStreetMap の [Nominatim](https://nominatim.org/) に送ります。おしゃべりを OFF にしているときは送りません
+
 ### ストリートビューで一緒に歩く
 
 Googleマップでストリートビューを開くと、画面の下に**アバターが後ろ姿で表示**されます。
 
 - ↑キーや地面の矢印クリックで進むと、アバターも一緒に歩きます(↓キーで後ろ歩き)
 - 視点を回すと、アバターも少し遅れて向きを変えます
-- 1〜8 キーでモーション(手を振る / よろこぶ / ダンス / ピース / おじぎ / くるっと回る / 見回す / のびをする)
-- アバターはストリートビューと同じカメラで、足元が画面の下のほうに来る距離(横長の画面で 7〜8m 先)に立っているように描かれます
+- 1〜9 キーでモーション(手を振る / よろこぶ / ダンス / ピース / おじぎ / くるっと回る / 見回す / のびをする / こっちこっち)
+- アバターはストリートビューと同じカメラで、足元が画面の下のほうに来る距離(横長の画面で 7〜8m 先)の、少し右(1.5m)に立っているように描かれます
 - 画面上の「👧 アバター ON/OFF」ボタンで表示を切り替えられます
 - キャラクターは3Dマップのパネルで選んだもの(女の子/ロボット)が使われます
 
@@ -65,13 +81,13 @@ Googleマップでストリートビューを開くと、画面の下に**アバ
 | ホイール | ズーム |
 | Space | ジャンプ |
 | 1 / 2 / 3 / 4 | 手を振る / よろこぶ / ダンス / ピース |
-| 5 / 6 / 7 / 8 | おじぎ / くるっと回る / 見回す / のびをする |
+| 5 / 6 / 7 / 8 / 9 | おじぎ / くるっと回る / 見回す / のびをする / こっちこっち |
 | C | カメラの背後追従のオン・オフ |
 | F または / | 場所を検索 |
 | H | 操作方法の表示 |
 | Esc | 自動歩行をやめる |
 
-右上のパネルでは、モーションのボタン(数字キーと同じ)、アバターの大きさ・速さの変更、自分の3Dモデル(`.glb`)の読み込み、現在地への移動、同じ場所をGoogleマップやストリートビューで開くことができます。
+右上のパネルでは、モーションのボタン(数字キーと同じ)、おしゃべり(吹き出し)の ON/OFF、アバターの大きさ・速さの変更、自分の3Dモデル(`.glb`)の読み込み、現在地への移動、同じ場所をGoogleマップやストリートビューで開くことができます。
 
 ### 自分のアバターを使う
 
@@ -87,8 +103,9 @@ npm run build   # src/main.js を extension/build/ にビルド
 ```
 
 - `src/main.js` — 地図・アバター・操作のメイン処理
-- `src/streetview.js` — ストリートビューの上に重ねるアバター(奥行きによる隠れ・地面の高さ合わせ)
-- `src/offscreen.js` — 画面キャプチャからの奥行き推定(transformers.js)
+- `src/streetview.js` — ストリートビューの上に重ねるアバター(奥行きによる隠れ・地面の高さ合わせ・椅子に座る)
+- `src/offscreen.js` — 画面キャプチャからの奥行き推定と、椅子や犬・猫などの検出(transformers.js)
+- `src/companion.js` — 一緒にお散歩している感じのおしゃべり(吹き出しとセリフ)
 - `src/avatar-model.js` — モデルの読み込みと大きさ・向きの正規化
 - `src/vrm-animator.js` — VRMモデルの歩行・エモート・表情の手続き的アニメーション
 - `extension/` — 拡張本体(`manifest.json`、`map.html`、`background.js`、Googleマップ用の `content/`)
@@ -96,8 +113,9 @@ npm run build   # src/main.js を extension/build/ にビルド
 ## クレジット
 
 - 地図データ © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors、タイル: [OpenFreeMap](https://openfreemap.org/)
-- 場所検索: [Nominatim](https://nominatim.org/)
+- 場所検索・地名: [Nominatim](https://nominatim.org/)
 - 奥行き推定: [Depth Anything V2 Small](https://huggingface.co/depth-anything/Depth-Anything-V2-Small)(Apache-2.0)、[transformers.js](https://github.com/huggingface/transformers.js)、ONNX Runtime Web(MIT)
+- 物体検出(椅子・犬・猫など): [D-FINE](https://github.com/Peterande/D-FINE) small(Apache-2.0、[onnx-community/dfine_s_coco-ONNX](https://huggingface.co/onnx-community/dfine_s_coco-ONNX))
 - 女の子モデル: "VRM1_Constraint_Twist_Sample" © 2022 pixiv Inc.([VRM Public License 1.0](https://vrm.dev/licenses/1.0/)、再配布可)、three-vrm examples より
 - ロボットモデル: "RobotExpressive" by [Tomás Laulhé](https://www.patreon.com/quaternius)(CC0)、three.js examples より
 - MapLibre GL JS(BSD-3-Clause)、three.js(MIT)、three-vrm(MIT)

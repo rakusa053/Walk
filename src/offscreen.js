@@ -1,6 +1,8 @@
-// 画面キャプチャから奥行きを推定し(Depth Anything V2 / transformers.js)、座れる椅子・ベンチも探す。
+// 画面キャプチャから奥行きを推定し(Depth Anything V2 / transformers.js)、座れる椅子・ベンチや、
+// 話題にする犬・猫・鳥なども探す。
 // 拡張のオフスクリーンドキュメントで動き、background.js から呼ばれる。
 import { env, pipeline, RawImage } from '@huggingface/transformers';
+import { THING_LABELS } from './companion.js';
 
 const MODEL = 'onnx-community/depth-anything-v2-small';
 const OUT_WIDTH = 192; // 返す奥行きマップの横幅
@@ -41,16 +43,18 @@ function loadDetector() {
   return detectorPromise;
 }
 
-// 座れる物(椅子・ベンチ・ソファ)の枠を、画面に対する割合で返す。モデルがまだ使えなければ null
-async function detectSeats(image) {
+// 座れる物(椅子・ベンチ・ソファ)と話題にする物(犬・猫など)の枠を、画面に対する割合で返す。
+// モデルがまだ使えなければどちらも null
+async function detectObjects(image) {
   try {
     const detector = await Promise.race([loadDetector(), new Promise((r) => setTimeout(r, DETECT_WAIT_MS, null))]);
-    if (!detector) return null;
+    if (!detector) return { seats: null, things: null };
     const found = await detector(image, { threshold: 0.5, percentage: true });
-    return found.filter((d) => SEAT_LABELS.has(d.label)).map(({ label, score, box }) => ({ label, score, box }));
+    const pick = (labels) => found.filter((d) => labels.has(d.label)).map(({ label, score, box }) => ({ label, score, box }));
+    return { seats: pick(SEAT_LABELS), things: pick(new Set(THING_LABELS)) };
   } catch (e) {
-    console.warn('[Walk 3D] 椅子を探せませんでした', e);
-    return null;
+    console.warn('[Walk 3D] 椅子などを探せませんでした', e);
+    return { seats: null, things: null };
   }
 }
 
@@ -97,7 +101,7 @@ async function estimate(dataUrl) {
       out[y * ow + x] = Math.round(src[sy * w + sx] * 1000) / 1000;
     }
   }
-  return { width: ow, height: oh, data: out, seats: await detectSeats(image) };
+  return { width: ow, height: oh, data: out, ...(await detectObjects(image)) };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

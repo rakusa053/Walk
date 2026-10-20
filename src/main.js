@@ -2,6 +2,7 @@ import * as maplibregl from 'maplibre-gl';
 import * as THREE from 'three';
 import { BUILTIN_MODELS, builtinModelUrl, createLoader, disposeVrm, findClip, normalizeModel } from './avatar-model.js';
 import { VrmAnimator } from './vrm-animator.js';
+import { Companion, areaName, formatDistance, greetingKey, passedMilestone } from './companion.js';
 
 // ---------------------------------------------------------------------------
 // 設定
@@ -31,6 +32,24 @@ const state = {
 };
 
 const keys = new Set();
+
+// 一緒に散歩している感じ(ときどき振り返る・吹き出しで話しかける・立ち止まると手招き)
+const companion = new Companion();
+const talk = {
+  walkTime: 0, // 歩き続けている秒数
+  stillSince: 0, // 立ち止まった時刻(秒)。フレームが遅くても実際の時間で数える
+  nextLookBack: 15,
+  lookUntil: 0, // この時刻(秒)まで振り返る
+  beckoned: false,
+  sessionM: 0, // このページを開いてから一緒に歩いた距離
+  greeted: false,
+  geoBusy: false,
+  geoAt: null,
+  geoTime: -1e9,
+  area: null,
+  city: null,
+};
+const nowS = () => performance.now() / 1000;
 
 // ---------------------------------------------------------------------------
 // 初期位置(URLパラメータ > 前回の位置 > 東京駅)
@@ -146,6 +165,7 @@ function setModel(gltf) {
     spin: findClip(clips, [/spin/i, /turn/i]),
     lookaround: findClip(clips, [/look/i]),
     stretch: findClip(clips, [/stretch/i]),
+    beckon: findClip(clips, [/beckon/i, /wave/i]),
   };
   if (!pick.walk) pick.walk = pick.run || pick.idle || clips[0] || null;
   if (!pick.run) pick.run = pick.walk;
@@ -170,11 +190,11 @@ function setModel(gltf) {
   state.dirty = true;
 }
 
-const ONE_SHOT_EMOTES = ['jump', 'wave', 'thumbsup', 'peace', 'bow', 'spin', 'lookaround', 'stretch'];
+const ONE_SHOT_EMOTES = ['jump', 'wave', 'thumbsup', 'peace', 'bow', 'spin', 'lookaround', 'stretch', 'beckon'];
 // 数字キー → エモート(3 のダンスだけは、もう一度押すまで続く)
 const EMOTE_KEYS = {
   Digit1: 'wave', Digit2: 'thumbsup', Digit3: 'dance', Digit4: 'peace',
-  Digit5: 'bow', Digit6: 'spin', Digit7: 'lookaround', Digit8: 'stretch',
+  Digit5: 'bow', Digit6: 'spin', Digit7: 'lookaround', Digit8: 'stretch', Digit9: 'beckon',
 };
 
 function playAction(name, fade = 0.25) {
@@ -191,6 +211,7 @@ function playAction(name, fade = 0.25) {
 }
 
 function triggerEmote(name) {
+  companion.say(name, {}, { priority: 2, cooldown: 4 });
   if (avatar.animator) {
     clearTarget();
     state.emote = name;
@@ -252,8 +273,105 @@ const avatarLayer = {
     avatar.root.rotation.y = Math.PI - toRad(state.heading);
     this.renderer.resetState();
     this.renderer.render(this.scene, this.camera);
+    companion.update(bubbleAnchor(this.camera.projectionMatrix));
   },
 };
+
+// 吹き出しを出す位置(アバターの頭の少し上を、画面の座標にしたもの)
+const anchorV4 = new THREE.Vector4();
+const headPos = new THREE.Vector3();
+function bubbleAnchor(proj) {
+  if (!avatar.model || !map) return null;
+  const head = avatar.vrm?.humanoid?.getRawBoneNode('head');
+  if (head) {
+    head.getWorldPosition(headPos);
+    headPos.y += 0.3 * state.size;
+  } else {
+    headPos.set(0, (AVATAR_HEIGHT_M + 0.25) * state.size, 0);
+  }
+  anchorV4.set(headPos.x, headPos.y, headPos.z, 1).applyMatrix4(proj);
+  if (anchorV4.w <= 0) return null;
+  const rect = map.getCanvas().getBoundingClientRect();
+  return {
+    x: rect.left + ((anchorV4.x / anchorV4.w + 1) / 2) * rect.width,
+    y: rect.top + ((1 - anchorV4.y / anchorV4.w) / 2) * rect.height,
+  };
+}
+
+// 歩いているあいだ・立ち止まったときに、振り返ったり話しかけたりする
+function updateCompanion(dt, moving) {
+  const a = avatar.animator;
+  const still = nowS() - talk.stillSince;
+  if (moving) {
+    if (talk.walkTime === 0 && still > 15) companion.say('walkStart', {}, { cooldown: 60 });
+    talk.stillSince = nowS();
+    talk.beckoned = false;
+    talk.walkTime += dt;
+    // ときどき振り返って「ついてきてる?」
+    if (talk.walkTime > talk.nextLookBack) {
+      talk.lookUntil = nowS() + 1.6;
+      talk.nextLookBack = talk.walkTime + 12 + Math.random() * 13;
+    }
+    maybeLookupArea();
+  } else {
+    // 歩き終わったら一度振り返る
+    if (talk.walkTime > 4) talk.lookUntil = nowS() + 1.6;
+    talk.walkTime = 0;
+    talk.nextLookBack = 8 + Math.random() * 8;
+  }
+
+  // はじめにあいさつ(時間帯で変える)と、いる場所の地名
+  if (!talk.greeted && avatar.model) {
+    talk.greeted = true;
+    companion.say(greetingKey(), {}, { priority: 3, cooldown: 0 });
+    maybeLookupArea();
+  }
+
+  // 立ち止まったままだと「こっちこっち」(エモート中はしない)
+  if (!talk.beckoned && !moving && !state.emote && !a?.emote && still > 25) {
+    talk.beckoned = true;
+    companion.say('idle', {}, { cooldown: 60, queue: true });
+    if (a) a.startEmote('beckon');
+  }
+
+  if (!a) return;
+  a.talking = companion.talking;
+  // 振り返る・話しているときは、カメラ(地図の手前)のほうを向く
+  if (nowS() < talk.lookUntil || companion.talking) {
+    const rel = angleDiff(state.heading, map.getBearing() + 180); // アバターの正面から時計回りに見たカメラの方向
+    a.lookAt(-toRad(rel), Math.min(0.5, toRad(90 - map.getPitch()) * 0.6));
+  } else {
+    a.stopLooking();
+  }
+}
+
+// 地名を調べて、変わったら「〇〇に来たね」(200m 動くごと、15 秒以上あけて)
+function maybeLookupArea() {
+  if (!companion.enabled || talk.geoBusy || nowS() - talk.geoTime < 15 || !hasChromeStorage) return;
+  if (talk.geoAt && vectorTo(talk.geoAt, state.pos).dist < 200) return;
+  const { lat, lng } = state.pos;
+  talk.geoBusy = true;
+  talk.geoAt = { lat, lng };
+  talk.geoTime = nowS();
+  chrome.runtime
+    .sendMessage({ type: 'reverse-geocode', lat, lng, lang: navigator.language })
+    .then((res) => {
+      const area = areaName(res?.address);
+      if (!area?.name) return;
+      const opts = { priority: 2, cooldown: 0, queue: true };
+      if (talk.area === null) companion.say('areaStart', { name: area.name }, opts);
+      else if (area.name !== talk.area) {
+        if (area.city && talk.city && area.city !== talk.city) companion.say('areaCity', { name: area.name, city: area.city }, opts);
+        else companion.say('area', { name: area.name }, opts);
+      }
+      talk.area = area.name;
+      talk.city = area.city;
+    })
+    .catch((e) => console.warn('[Walk 3D] 地名を調べられませんでした', e))
+    .finally(() => {
+      talk.geoBusy = false;
+    });
+}
 
 // ---------------------------------------------------------------------------
 // 地図
@@ -350,6 +468,7 @@ function setTarget(lngLat) {
     targetMarker = new maplibregl.Marker({ element: el, anchor: 'bottom' });
   }
   targetMarker.setLngLat(lngLat).addTo(map);
+  companion.say('target', {}, { cooldown: 40 });
   // 歩き出す前に、いまのエモートをやめる(ジャンプは着地まで続ける)。VRM のアニメーションにも伝えないと、
   // すぐ近くをクリックして歩かなかったとき、ダンスだけが続いて 3 キーで止められなくなる
   if (state.emote !== 'jump') {
@@ -415,6 +534,11 @@ function tick(t) {
     state.pos = offset(state.pos, state.heading, step);
     state.distance += Math.abs(step);
     state.dirty = true;
+    // 一緒に歩いた距離が区切りを越えたら一言
+    const before = talk.sessionM;
+    talk.sessionM += Math.abs(step);
+    const mark = passedMilestone(before, talk.sessionM);
+    if (mark) companion.say('distance', { d: formatDistance(mark) }, { priority: 2, cooldown: 0, queue: true });
   }
 
   // アニメーション
@@ -433,6 +557,8 @@ function tick(t) {
     else if (a) a.timeScale = 1;
     avatar.mixer.update(dt);
   }
+
+  updateCompanion(dt, moving);
 
   // カメラ追従
   const cam = { center: [state.pos.lng, state.pos.lat] };
@@ -500,6 +626,11 @@ function setupUi() {
         li.textContent = item.display_name;
         li.addEventListener('click', () => {
           teleport(parseFloat(item.lon), parseFloat(item.lat));
+          companion.say('warp', { name: item.name || item.display_name.split(',')[0] }, { priority: 2, cooldown: 0 });
+          // ワープした先の地名をすぐ調べ直す
+          talk.geoAt = null;
+          talk.geoTime = -1e9;
+          maybeLookupArea();
           results.hidden = true;
           $('search-input').blur();
         });
@@ -527,6 +658,24 @@ function setupUi() {
     state.speedMul = parseFloat(speed.value);
     $('speed-val').textContent = `×${state.speedMul}`;
   });
+
+  // おしゃべり(吹き出し)の ON/OFF。ストリートビューの 💬 ボタンと同じ設定
+  const talkBox = $('talk');
+  talkBox.addEventListener('change', () => {
+    companion.setEnabled(talkBox.checked);
+    if (hasChromeStorage) chrome.storage.local.set({ talk: talkBox.checked }).catch(() => {});
+  });
+  if (hasChromeStorage) {
+    chrome.storage.local.get('talk').then(({ talk: on }) => {
+      talkBox.checked = on !== false;
+      companion.setEnabled(talkBox.checked);
+    });
+    chrome.storage.onChanged.addListener((changes) => {
+      if (!changes.talk) return;
+      talkBox.checked = changes.talk.newValue !== false;
+      companion.setEnabled(talkBox.checked);
+    });
+  }
 
   const follow = $('follow');
   follow.checked = state.follow;

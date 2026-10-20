@@ -5,10 +5,13 @@
 //  - 手前にある建物や人の後ろにアバターを隠す
 //  - 坂道や階段ではアバターを地面の高さに合わせる
 //  - 椅子やベンチが写っていたら、そこまで歩いていって座る
-// ようにしている。奥行きは「足元は平らな地面」という前提で実際の距離(m)に換算する。
+// ようにしている。また、一緒に散歩している感じが出るように、ときどき振り返ったり、
+// 吹き出しで話しかけたり(companion.js)、立ち止まっていると手招きしたりする。
+// 奥行きは「足元は平らな地面」という前提で実際の距離(m)に換算する。
 import * as THREE from 'three';
 import { builtinModelUrl, createLoader, disposeVrm, findClip, normalizeModel } from './avatar-model.js';
 import { VrmAnimator } from './vrm-animator.js';
+import { Companion, areaName, formatDistance, greetingKey, passedMilestone } from './companion.js';
 
 const AVATAR_HEIGHT_M = 1.7;
 const CAMERA_HEIGHT_M = 2.5; // ストリートビューのカメラの高さ(撮影車のおおよその値)
@@ -28,9 +31,21 @@ const SEAT_WALK_SPEED = 1.1; // m/s
 const SIT_AFTER_IDLE_S = 2; // 操作がなくなって(視点が止まって)からこの秒数たったら座りに行く
 const SEAT_COOLDOWN_S = 10; // キー操作で立たせたあと、また座りに行くまでの秒数
 const SIT_ANGLE = 0.45; // 座るときの向き(カメラの方向から少しずらす)[rad]
+// 一緒に散歩している感じ
+const SIDE_M = 1.5; // 画面の真ん中ではなく少し右を歩く(となりを一歩先に歩いている感じ)
+const LOOK_BACK_EVERY_S = [12, 25]; // 歩いているあいだ、この間隔でときどき振り返る
+const LOOK_BACK_S = 1.6; // 振り返っている時間
+const IDLE_BECKON_S = 25; // 立ち止まったままこの秒数たつと「こっちこっち」と手招き
+const GEO_STEP_M = 200; // この距離を動くたびに、地名を調べる
 
 let ctx = null; // 表示中のオーバーレイ
 let loadingKey = null;
+let talkEnabled = true; // 吹き出しでおしゃべりするか
+// このページで一緒に歩いた距離と、いまいる地名(ストリートビューを出たり入ったりしても続ける)
+let walkedM = 0;
+let greeted = false;
+let lastArea = null;
+let lastCity = null;
 
 const toRad = (d) => (d * Math.PI) / 180;
 const angleDiff = (a, b) => ((b - a + 540) % 360) - 180;
@@ -159,13 +174,14 @@ function buildDepthField(depth, cam) {
     metric[k] = den > 1e-6 ? Math.min(FAR, Math.max(NEAR, fit.a / den)) : FAR;
   }
 
-  // 画面中央の縦の帯で、アバターの距離あたりにある点の高さを集める。
+  // アバターが立つ位置(画面のやや右)の縦の帯で、アバターの距離あたりにある点の高さを集める。
   // 足元の地面が画面の外(下)にあるときは、手前の車などを地面と取り違えるので集めない
   const heights = [];
-  const bottom = rayFor(0.5, 1, cam);
+  const uc = 0.5 + (cam.side / (cam.dist * Math.tan(toRad(cam.fov) / 2) * cam.aspect)) * 0.5;
+  const bottom = rayFor(uc, 1, cam);
   const feetVisible = bottom.y < 0 && (CAMERA_HEIGHT_M / -bottom.y) * -bottom.z < cam.dist - 0.45;
   for (let j = 0; feetVisible && j < h; j++) {
-    for (let i = Math.floor(w * 0.4); i < w * 0.6; i++) {
+    for (let i = Math.max(0, Math.floor(w * (uc - 0.1))); i < Math.min(w, w * (uc + 0.1)); i++) {
       const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
       const z = metric[j * w + i];
       const forward = -r.z * z;
@@ -291,8 +307,24 @@ function createOverlay() {
     plan: null, // 座りに行く途中・座っているときの予定
     at: null, // いつもの位置以外にいるときの位置 {x, z}
     yaw: Math.PI, // アバターの向き(+Z 向きのモデルを奥へ向けると π)
-    seatIdle: 0, // 操作がなくなってからの秒数
-    seatCooldown: 0,
+    lastActive: 0, // 最後に操作した時刻(秒)。フレームが遅くても実際の時間で数える
+    seatCooldownUntil: 0,
+    home: { x: SIDE_M, z: -8 }, // いつもの位置(毎フレーム画角から決める)
+    companion: new Companion(),
+    things: [], // いまの視点で見つかった、話題にする物(犬・猫など)
+    stillSince: 0, // 視点が動かなくなった時刻(秒)
+    lastMoveAt: -1e9, // 最後に前へ進んだ(パノラマが変わった)時刻(秒)
+    walkTime: 0, // 歩き続けている秒数
+    nextLookBack: 15,
+    lookUntil: 0, // この時刻(秒)まで、lookTarget のほうを見る
+    lookTarget: null, // 'camera' または {x, z}
+    moveTimes: [], // 最近、前へ進んだ時刻(すばやく進むと走ってついてくる)
+    running: false,
+    beckoned: false,
+    sitSince: 0,
+    geoBusy: false,
+    geoAt: null,
+    geoTime: -1e9,
     walkTimer: 0,
     walkDir: 1,
     lag: 0,
@@ -301,6 +333,7 @@ function createOverlay() {
     last: performance.now(),
     onStatus: null,
   };
+  c.companion.setEnabled(talkEnabled);
 
   c.onResize = () => {
     renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -398,13 +431,14 @@ function setModel(c, gltf) {
 // 数字キー → エモート(3 のダンスだけは、もう一度押すまで続く)
 const EMOTE_KEYS = {
   Digit1: 'wave', Digit2: 'thumbsup', Digit3: 'dance', Digit4: 'peace',
-  Digit5: 'bow', Digit6: 'spin', Digit7: 'lookaround', Digit8: 'stretch',
+  Digit5: 'bow', Digit6: 'spin', Digit7: 'lookaround', Digit8: 'stretch', Digit9: 'beckon',
 };
 
 function triggerEmote(c, name) {
   cancelSeat(c, false); // 座っていたら、その場で立ってから
   c.walkTimer = 0;
   c.emote = name;
+  c.companion.say(name, {}, { priority: 2, cooldown: 4 });
   if (c.animator) {
     c.animator.startEmote(name);
   } else if (c.actions[name] && c.current === c.actions[name]) {
@@ -426,7 +460,7 @@ function playAction(c, name) {
 }
 
 function cameraParams(c) {
-  return { fov: c.camera.fov, aspect: c.camera.aspect, pitch: toDegPitch(c.view), dist: avatarDistance(c.camera.fov) };
+  return { fov: c.camera.fov, aspect: c.camera.aspect, pitch: toDegPitch(c.view), dist: avatarDistance(c.camera.fov), side: SIDE_M };
 }
 
 const avatarDistance = (vfov) =>
@@ -447,7 +481,8 @@ function update(c, dt) {
     c.camera.updateProjectionMatrix();
   }
   c.camera.rotation.set(toRad(toDegPitch(c.view)), 0, 0);
-  const home = { x: 0, z: -avatarDistance(c.camera.fov) };
+  const home = { x: SIDE_M, z: -avatarDistance(c.camera.fov) };
+  c.home = home;
 
   const walking = c.walkTimer > 0;
   c.walkTimer = Math.max(0, c.walkTimer - dt);
@@ -468,17 +503,149 @@ function update(c, dt) {
   const at = c.at || home;
   c.spot.position.set(at.x, c.ground, at.z);
 
+  updateCompanion(c, dt, walking);
+
   const forward = walking ? c.walkDir : seatForward;
+  const running = walking && c.running;
   if (c.animator) {
-    c.animator.update(dt, { forward, running: false, speed: walking ? 1.4 : SEAT_WALK_SPEED });
+    c.animator.update(dt, { forward, running, speed: running ? 3.2 : walking ? 1.4 : SEAT_WALK_SPEED });
     c.model.position.y = c.animator.lift;
   } else if (c.mixer) {
     playAction(c, walking ? 'walk' : c.emote || 'idle');
-    if (c.actions.walk) c.actions.walk.timeScale = c.walkDir;
+    if (c.actions.walk) c.actions.walk.timeScale = c.walkDir * (running ? 2 : 1);
     c.mixer.update(dt);
   }
 
   c.renderer.render(c.scene, c.camera);
+  c.companion.update(bubbleAnchor(c));
+}
+
+// ---------------------------------------------------------------------------
+// 一緒に散歩している感じ(振り返る・話しかける・手招き)
+// ---------------------------------------------------------------------------
+const nowS = () => performance.now() / 1000;
+
+// アバターから見て、点 (x, z) がどちらにあるか(体の正面から、+ が左)[rad]
+function yawToward(c, x, z) {
+  const at = c.at || c.home;
+  const vx = x - at.x;
+  const vz = z - at.z;
+  const lx = vx * Math.cos(c.yaw) - vz * Math.sin(c.yaw);
+  const lz = vx * Math.sin(c.yaw) + vz * Math.cos(c.yaw);
+  return Math.atan2(lx, lz);
+}
+
+function lookFor(c, target, seconds) {
+  c.lookTarget = target;
+  c.lookUntil = nowS() + seconds;
+}
+
+function updateCompanion(c, dt, walking) {
+  const a = c.animator;
+  if (!walking) c.running = false;
+
+  // 歩いているあいだ、ときどき振り返って「ついてきてる?」。歩き終わったときも一度振り返る
+  if (walking) {
+    c.walkTime += dt;
+    if (c.walkTime > c.nextLookBack) {
+      lookFor(c, 'camera', LOOK_BACK_S);
+      c.nextLookBack = c.walkTime + LOOK_BACK_EVERY_S[0] + Math.random() * (LOOK_BACK_EVERY_S[1] - LOOK_BACK_EVERY_S[0]);
+    }
+  } else if (c.walkTime > 0) {
+    if (c.walkTime > 4) lookFor(c, 'camera', LOOK_BACK_S);
+    c.walkTime = 0;
+    c.nextLookBack = 8 + Math.random() * 8;
+  }
+
+  // 立ち止まったままだと「こっちこっち」(VRM だけ。座っているとき・エモート中はしない)
+  if (a && !c.beckoned && !c.plan && !c.emote && !a.emote && nowS() - c.stillSince > IDLE_BECKON_S) {
+    c.beckoned = true;
+    a.startEmote('beckon');
+    c.companion.say('idle', {}, { cooldown: 60, queue: true });
+  }
+
+  // 座っているあいだ
+  if (c.plan?.phase === 'sit' && nowS() - c.sitSince > 50) c.companion.say('sitLong', {}, { cooldown: 120 });
+
+  // はじめてストリートビューに入ったら、あいさつ(時間帯で変える)
+  if (!greeted && c.model) {
+    greeted = true;
+    c.companion.say(greetingKey(), {}, { priority: 3, cooldown: 0 });
+    maybeLookupArea(c, c.view); // 地名は、あいさつのあとに言う
+  }
+
+  if (!a) return;
+  a.talking = c.companion.talking;
+  // 話しているときは、こちらを向く(物を見ているときはそちら)
+  let target = nowS() < c.lookUntil ? c.lookTarget : null;
+  if (!target && c.companion.talking && !c.plan) target = 'camera';
+  if (!target) {
+    a.stopLooking();
+  } else if (target === 'camera') {
+    const dist = Math.hypot((c.at || c.home).x, (c.at || c.home).z);
+    a.lookAt(yawToward(c, 0, 0), Math.atan2(CAMERA_HEIGHT_M - 1.5, dist));
+  } else {
+    a.lookAt(yawToward(c, target.x, target.z), 0);
+  }
+}
+
+// 吹き出しを出す位置(アバターの頭の少し上を、画面の座標にしたもの)
+const anchorVec = new THREE.Vector3();
+function bubbleAnchor(c) {
+  if (!c.model || c.canvas.style.visibility === 'hidden') return null;
+  const head = c.vrm?.humanoid?.getRawBoneNode('head');
+  if (head) {
+    head.getWorldPosition(anchorVec);
+    anchorVec.y += 0.3;
+  } else {
+    c.spot.getWorldPosition(anchorVec);
+    anchorVec.y += AVATAR_HEIGHT_M + 0.25;
+  }
+  anchorVec.project(c.camera);
+  if (anchorVec.z < -1 || anchorVec.z > 1) return null;
+  return { x: ((anchorVec.x + 1) / 2) * window.innerWidth, y: ((1 - anchorVec.y) / 2) * window.innerHeight };
+}
+
+// 地名を調べて、変わったら「〇〇に来たね」
+async function lookupArea(c, lat, lng) {
+  c.geoBusy = true;
+  c.geoAt = { lat, lng };
+  c.geoTime = nowS();
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'reverse-geocode', lat, lng, lang: navigator.language });
+    const area = areaName(res?.address);
+    if (!area?.name || ctx !== c) return;
+    const opts = { priority: 2, cooldown: 0, queue: true };
+    if (lastArea === null) c.companion.say('areaStart', { name: area.name }, opts);
+    else if (area.name !== lastArea) {
+      if (area.city && lastCity && area.city !== lastCity) c.companion.say('areaCity', { name: area.name, city: area.city }, opts);
+      else c.companion.say('area', { name: area.name }, opts);
+    }
+    lastArea = area.name;
+    lastCity = area.city;
+  } catch (e) {
+    console.warn('[Walk 3D] 地名を調べられませんでした', e);
+  } finally {
+    c.geoBusy = false;
+  }
+}
+
+function maybeLookupArea(c, view) {
+  if (!talkEnabled || c.geoBusy || !Number.isFinite(view?.lat) || nowS() - c.geoTime < 15) return;
+  if (c.geoAt) {
+    const dn = (view.lat - c.geoAt.lat) * 111320;
+    const de = (view.lng - c.geoAt.lng) * 111320 * Math.cos(toRad(view.lat));
+    if (Math.hypot(dn, de) < GEO_STEP_M) return;
+  }
+  lookupArea(c, view.lat, view.lng);
+}
+
+// 写真に写っている犬・猫などを話題にして、そちらを見る(別のことを話している間なら、そのあとで言う)
+function noticeThings(c) {
+  const best = c.things.filter((t) => t.score >= SEAT_MIN_SCORE).sort((p, q) => q.score - p.score)[0];
+  if (!best) return;
+  c.companion.say(best.label, {}, { cooldown: 90, queue: true });
+  lookFor(c, { x: best.x, z: best.z }, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -486,13 +653,12 @@ function update(c, dt) {
 // ---------------------------------------------------------------------------
 // 戻り値は、歩いているとき 1
 function updateSeat(c, dt, home) {
-  c.seatIdle += dt;
-  c.seatCooldown = Math.max(0, c.seatCooldown - dt);
   const plan = c.plan;
   if (!plan) {
     // VRM(女の子)だけ。ロボットには座るアニメーションがない
     const idle = c.animator && !c.emote && !c.animator.emote && c.walkTimer <= 0;
-    if (idle && c.seats.length && c.seatCooldown <= 0 && c.seatIdle >= SIT_AFTER_IDLE_S) startSeat(c, home);
+    const t = nowS();
+    if (idle && c.seats.length && t >= c.seatCooldownUntil && t - c.lastActive >= SIT_AFTER_IDLE_S) startSeat(c, home);
     return 0;
   }
   const { seat } = plan;
@@ -518,6 +684,8 @@ function updateSeat(c, dt, home) {
   if (plan.phase === 'turn' && Math.abs(angleDiffRad(c.yaw, plan.yaw)) < 0.15) {
     plan.phase = 'sit';
     c.animator?.setSitting(true);
+    c.sitSince = nowS();
+    c.companion.say('sit', {}, { cooldown: 60 });
   }
   return 0;
 }
@@ -541,11 +709,12 @@ function startSeat(c, home) {
 
 // 座るのをやめて立つ。reset なら(視点が変わったとき)いつもの位置へすぐ戻る
 function cancelSeat(c, reset) {
-  c.seatIdle = 0;
+  c.lastActive = nowS();
+  if (c.plan?.phase === 'sit' && !reset) c.companion.say('stand', {}, { cooldown: 30 });
   if (c.plan) {
     c.plan = null;
     c.animator?.setSitting(false, reset);
-    c.seatCooldown = reset ? 0 : SEAT_COOLDOWN_S;
+    c.seatCooldownUntil = reset ? 0 : nowS() + SEAT_COOLDOWN_S;
   }
   if (reset && c.at) {
     c.at = null;
@@ -569,6 +738,7 @@ function invalidateDepth(c) {
   c.viewChangedAt = performance.now();
   // 見つけていた椅子の位置も使えなくなるので、座っていたらいつもの位置に戻る
   c.seats = [];
+  c.things = [];
   c.seatRetries = 0;
   cancelSeat(c, true);
 }
@@ -588,6 +758,7 @@ async function maybeEstimateDepth(c) {
     // アバターとボタンが写らないように一瞬隠してキャプチャする
     const bar = document.getElementById('walk3d-buttons');
     c.canvas.style.visibility = 'hidden';
+    c.companion.el.style.visibility = 'hidden';
     if (bar) bar.style.visibility = 'hidden';
     await nextFrame();
     await nextFrame();
@@ -596,6 +767,7 @@ async function maybeEstimateDepth(c) {
       shot = await chrome.runtime.sendMessage({ type: 'sv-capture' });
     } finally {
       c.canvas.style.visibility = '';
+      c.companion.el.style.visibility = '';
       if (bar) bar.style.visibility = '';
     }
     if (!shot || shot.error) throw new Error(shot?.error || 'capture failed');
@@ -642,6 +814,11 @@ function applyDepth(c, depth, cam) {
   c.homeGround = field.ground;
   if (!c.at) c.groundTarget = field.ground;
   c.seats = findSeats(field, depth.seats, cam);
+  c.things = (depth.things || []).flatMap((t) => {
+    const at = locateSeat(field, cam, t.box);
+    return at ? [{ label: t.label, score: t.score, x: at.x, z: at.z }] : [];
+  });
+  noticeThings(c);
   c.onStatus?.('ok');
 }
 
@@ -662,7 +839,27 @@ export function updateView(view) {
   const dn = (view.lat - prev.lat) * 111320;
   const de = (view.lng - prev.lng) * 111320 * Math.cos(toRad(view.lat));
   const moved = Math.hypot(dn, de);
+  if (key !== viewKeyOf(prev)) {
+    ctx.stillSince = nowS();
+    ctx.beckoned = false;
+  }
   if (moved > 0.3) {
+    const c = ctx;
+    // 一緒に歩いた距離。区切りの距離を越えたら一言
+    const before = walkedM;
+    walkedM += Math.min(moved, 100); // ワープのような大きな移動は数えすぎない
+    const mark = passedMilestone(before, walkedM);
+    if (mark) c.companion.say('distance', { d: formatDistance(mark) }, { priority: 2, cooldown: 0, queue: true });
+    // しばらく止まっていたあとに歩き出したら「いこいこ!」、続けてすばやく進んだら走ってついてくる
+    const t = nowS();
+    if (t - c.lastMoveAt > 15) c.companion.say('walkStart', {}, { cooldown: 60 });
+    c.moveTimes = c.moveTimes.filter((m) => t - m < 2.5).concat(t);
+    if (c.moveTimes.length >= 3 && !c.running) {
+      c.running = true;
+      c.companion.say('run', {}, { cooldown: 45 });
+    }
+    c.lastMoveAt = t;
+    maybeLookupArea(c, view);
     // 進んだ方向が、見ている向きの前か後ろか
     const bearing = (Math.atan2(de, dn) * 180) / Math.PI;
     const ahead = Math.abs(angleDiff(prev.heading ?? view.heading ?? 0, bearing)) < 100;
@@ -683,6 +880,7 @@ export async function show(modelKey, view, onStatus) {
   if (view) {
     ctx.view = null;
     updateView(view);
+    if (greeted) maybeLookupArea(ctx, view); // はじめて入ったときは、あいさつのあとで調べる
   }
   if (ctx.modelKey === modelKey || loadingKey === modelKey) return;
   loadingKey = modelKey;
@@ -708,8 +906,15 @@ export function hide() {
   ctx.renderer.dispose();
   ctx.renderer.forceContextLoss();
   ctx.canvas.remove();
+  ctx.companion.dispose();
   ctx = null;
   loadingKey = null;
+}
+
+// 吹き出しのおしゃべりをするか(gmaps.js の 💬 ボタン)
+export function setTalk(on) {
+  talkEnabled = on;
+  ctx?.companion.setEnabled(on);
 }
 
 // テスト用
