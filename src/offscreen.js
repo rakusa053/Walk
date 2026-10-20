@@ -1,9 +1,14 @@
-// 画面キャプチャから奥行きを推定する(Depth Anything V2 / transformers.js)。
+// 画面キャプチャから奥行きを推定し(Depth Anything V2 / transformers.js)、座れる椅子・ベンチも探す。
 // 拡張のオフスクリーンドキュメントで動き、background.js から呼ばれる。
 import { env, pipeline, RawImage } from '@huggingface/transformers';
 
 const MODEL = 'onnx-community/depth-anything-v2-small';
 const OUT_WIDTH = 192; // 返す奥行きマップの横幅
+// 椅子・ベンチを探す物体検出(D-FINE small、COCO の 80 種類)。D-FINE nano より大きいが、
+// nano は柵をベンチと間違えやすく、カフェの椅子も見落としやすかった
+const DETECTOR = 'onnx-community/dfine_s_coco-ONNX';
+const SEAT_LABELS = new Set(['chair', 'bench', 'couch']);
+const DETECT_WAIT_MS = 1500; // 初回はモデル(約40MB)のダウンロードを待たずに、奥行きだけ先に返す
 
 env.allowLocalModels = false;
 env.useWasmCache = false; // blob: URL の import は拡張の CSP で禁止されている
@@ -13,6 +18,7 @@ env.backends.onnx.wasm.wasmPaths = {
 };
 
 let estimatorPromise = null;
+let detectorPromise = null;
 
 async function createEstimator() {
   if (navigator.gpu) {
@@ -23,6 +29,29 @@ async function createEstimator() {
     }
   }
   return pipeline('depth-estimation', MODEL, { device: 'wasm', dtype: 'q8' });
+}
+
+function loadDetector() {
+  if (!detectorPromise) {
+    detectorPromise = pipeline('object-detection', DETECTOR, { device: 'wasm', dtype: 'fp32' }).catch((e) => {
+      detectorPromise = null;
+      throw e;
+    });
+  }
+  return detectorPromise;
+}
+
+// 座れる物(椅子・ベンチ・ソファ)の枠を、画面に対する割合で返す。モデルがまだ使えなければ null
+async function detectSeats(image) {
+  try {
+    const detector = await Promise.race([loadDetector(), new Promise((r) => setTimeout(r, DETECT_WAIT_MS, null))]);
+    if (!detector) return null;
+    const found = await detector(image, { threshold: 0.5, percentage: true });
+    return found.filter((d) => SEAT_LABELS.has(d.label)).map(({ label, score, box }) => ({ label, score, box }));
+  } catch (e) {
+    console.warn('[Walk 3D] 椅子を探せませんでした', e);
+    return null;
+  }
 }
 
 // Googleマップの検索欄やミニ地図が入らないよう、画面の中央下側だけを見る
@@ -68,7 +97,7 @@ async function estimate(dataUrl) {
       out[y * ow + x] = Math.round(src[sy * w + sx] * 1000) / 1000;
     }
   }
-  return { width: ow, height: oh, data: out };
+  return { width: ow, height: oh, data: out, seats: await detectSeats(image) };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

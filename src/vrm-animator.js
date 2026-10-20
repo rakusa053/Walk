@@ -33,6 +33,7 @@ export class VrmAnimator {
     for (const n of names) this.bones[n] = vrm.humanoid?.getNormalizedBoneNode(n) || null;
     this.hipsRestY = this.bones.hips ? this.bones.hips.position.y : 0;
     this.legLength = this.estimateLegLength();
+    this.thighLength = this.estimateThighLength();
     this.time = 0;
     this.phase = 0;
     this.moveWeight = 0; // 0=停止 1=歩行
@@ -47,6 +48,8 @@ export class VrmAnimator {
     this.spin = 0;
     this.idleTime = 0;
     this.nextIdleEmote = 10 + Math.random() * 8;
+    this.sitting = false; // 椅子に座っている(座ろうとしている)
+    this.sitWeight = 0; // 0=立っている 1=座っている
   }
 
   estimateLegLength() {
@@ -60,9 +63,32 @@ export class VrmAnimator {
     return Math.max(0.3, a.distanceTo(b) * scene.scale.y);
   }
 
+  // 座ったとき腰を下げる量。太ももを水平にすると、腰がひざの高さまで下がる(ボーンの親の座標で測る)
+  estimateThighLength() {
+    const up = this.bones.leftUpperLeg;
+    const low = this.bones.leftLowerLeg;
+    const parent = this.bones.hips?.parent;
+    if (!up || !low || !parent) return 0.4;
+    const a = parent.worldToLocal(up.getWorldPosition(new THREE.Vector3()));
+    const b = parent.worldToLocal(low.getWorldPosition(new THREE.Vector3()));
+    return a.distanceTo(b);
+  }
+
   startEmote(name) {
     this.emote = name;
     this.emoteTime = 0;
+    this.sitting = false; // エモートは立ってから
+  }
+
+  // 座る/立つ。now なら途中の動きなしで切り替える(別の場所へ移るとき)
+  setSitting(on, now = false) {
+    this.sitting = on;
+    if (on) this.stopEmote();
+    if (now) this.sitWeight = on ? 1 : 0;
+  }
+
+  get seated() {
+    return this.sitting && this.sitWeight >= 1;
   }
 
   stopEmote() {
@@ -74,6 +100,10 @@ export class VrmAnimator {
     this.time += dt;
     const moving = motion.forward !== 0;
     if (moving && this.emote && this.emote !== 'jump') this.stopEmote();
+    if (moving) this.sitting = false;
+    // 0.7 秒で座る・立つ
+    const sitStep = dt / 0.7;
+    this.sitWeight = this.sitting ? Math.min(1, this.sitWeight + sitStep) : Math.max(0, this.sitWeight - sitStep);
 
     this.moveWeight = lerp(this.moveWeight, moving ? 1 : 0, Math.min(1, dt * 8));
     this.runWeight = lerp(this.runWeight, motion.running ? 1 : 0, Math.min(1, dt * 5));
@@ -98,8 +128,8 @@ export class VrmAnimator {
     }
     this.emoteWeight = emoteW;
 
-    // 立ち止まってしばらくすると、見回したり伸びをしたりする
-    if (moving || this.emote) {
+    // 立ち止まってしばらくすると、見回したり伸びをしたりする(座っているあいだはしない)
+    if (moving || this.emote || this.sitting || this.sitWeight > 0) {
       this.idleTime = 0;
     } else {
       this.idleTime += dt;
@@ -131,12 +161,12 @@ export class VrmAnimator {
     // --- 脚 ---
     const legAmp = lerp(0.45, 0.85, rw) * mw;
     const kneeAmp = lerp(0.55, 1.3, rw) * mw;
-    set(b.leftUpperLeg, -s * legAmp, 0, 0);
-    set(b.rightUpperLeg, s * legAmp, 0, 0);
-    set(b.leftLowerLeg, Math.max(0, c) * kneeAmp + 0.05 * mw, 0, 0);
-    set(b.rightLowerLeg, Math.max(0, -c) * kneeAmp + 0.05 * mw, 0, 0);
-    set(b.leftFoot, (s * 0.2 - Math.max(0, c) * 0.2) * mw, 0, 0);
-    set(b.rightFoot, (-s * 0.2 - Math.max(0, -c) * 0.2) * mw, 0, 0);
+    let lUpLeg = [-s * legAmp, 0, 0];
+    let rUpLeg = [s * legAmp, 0, 0];
+    let lLowLeg = [Math.max(0, c) * kneeAmp + 0.05 * mw, 0, 0];
+    let rLowLeg = [Math.max(0, -c) * kneeAmp + 0.05 * mw, 0, 0];
+    let lFoot = [(s * 0.2 - Math.max(0, c) * 0.2) * mw, 0, 0];
+    let rFoot = [(-s * 0.2 - Math.max(0, -c) * 0.2) * mw, 0, 0];
 
     // --- 腕(女の子らしく脇を少し締めて、ひじを軽く曲げる) ---
     const armDown = 1.2;
@@ -191,10 +221,10 @@ export class VrmAnimator {
           this.lift = 4 * air * (1 - air) * 0.55;
           hipsY -= crouch * 0.12;
           const k = Math.max(crouch, air > 0 && air < 1 ? 0.35 : 0);
-          set(b.leftUpperLeg, -k * 0.9, 0, 0);
-          set(b.rightUpperLeg, -k * 0.9, 0, 0);
-          set(b.leftLowerLeg, k * 1.6, 0, 0);
-          set(b.rightLowerLeg, k * 1.6, 0, 0);
+          lUpLeg = [-k * 0.9, 0, 0];
+          rUpLeg = [-k * 0.9, 0, 0];
+          lLowLeg = [k * 1.6, 0, 0];
+          rLowLeg = [k * 1.6, 0, 0];
           lArm = mix(lArm, [-0.4, 0, 0.3], ew * (air > 0 ? 1 : 0.3));
           rArm = mix(rArm, [-0.4, 0, -0.3], ew * (air > 0 ? 1 : 0.3));
           break;
@@ -211,10 +241,10 @@ export class VrmAnimator {
           rArm = mix(rArm, [-0.6 - bc * 0.3, 0, 0.2 + bs * 0.5], ew);
           lFore = mix(lFore, [0, -1.2, 0], ew);
           rFore = mix(rFore, [0, 1.2, 0], ew);
-          set(b.leftUpperLeg, -Math.max(0, bs) * 0.3 * ew, 0, -0.05 * ew);
-          set(b.rightUpperLeg, -Math.max(0, -bs) * 0.3 * ew, 0, 0.05 * ew);
-          set(b.leftLowerLeg, Math.max(0, bs) * 0.5 * ew, 0, 0);
-          set(b.rightLowerLeg, Math.max(0, -bs) * 0.5 * ew, 0, 0);
+          lUpLeg = [-Math.max(0, bs) * 0.3 * ew, 0, -0.05 * ew];
+          rUpLeg = [-Math.max(0, -bs) * 0.3 * ew, 0, 0.05 * ew];
+          lLowLeg = [Math.max(0, bs) * 0.5 * ew, 0, 0];
+          rLowLeg = [Math.max(0, -bs) * 0.5 * ew, 0, 0];
           break;
         }
         case 'peace': {
@@ -276,19 +306,46 @@ export class VrmAnimator {
           spineRot = mix(spineRot, [-0.18 * up, 0, 0], ew);
           headRot = mix(headRot, [-0.3 * up, 0, 0], ew);
           this.lift = 0.04 * up * ew;
-          set(b.leftFoot, 0.35 * up * ew, 0, 0);
-          set(b.rightFoot, 0.35 * up * ew, 0, 0);
+          lFoot = [0.35 * up * ew, 0, 0];
+          rFoot = [0.35 * up * ew, 0, 0];
           break;
         }
         default:
       }
     }
     if (this.emote !== 'spin') this.spin = 0;
+
+    // --- 座る(太ももを水平に、すねをまっすぐ下ろし、手はひざの上。ときどき足をぶらぶら) ---
+    const sw = smooth(this.sitWeight);
+    if (sw > 0) {
+      const swing = Math.sin(t * 2.4) * 0.22 * Math.max(0, Math.sin(t * 0.37));
+      lUpLeg = mix(lUpLeg, [-1.5, 0, 0.03], sw);
+      rUpLeg = mix(rUpLeg, [-1.5, 0, -0.03], sw);
+      lLowLeg = mix(lLowLeg, [1.45 + swing, 0, 0], sw);
+      rLowLeg = mix(rLowLeg, [1.45 - swing, 0, 0], sw);
+      lFoot = mix(lFoot, [0.05, 0, 0], sw);
+      rFoot = mix(rFoot, [0.05, 0, 0], sw);
+      hipsY -= this.thighLength * sw;
+      hipsRot = mix(hipsRot, [0, 0, 0], sw);
+      spineRot = mix(spineRot, [-0.06 + breath, 0, 0], sw);
+      headRot = mix(headRot, [0.06, Math.sin(t * 0.45) * 0.18, Math.sin(t * 0.7) * 0.05], sw);
+      lArm = mix(lArm, [-0.6, 0, -1.3], sw);
+      rArm = mix(rArm, [-0.6, 0, 1.3], sw);
+      lFore = mix(lFore, [0, -0.75, 0], sw);
+      rFore = mix(rFore, [0, 0.75, 0], sw);
+      this.lift *= 1 - sw;
+    }
     // 振り返るエモートは、体ごとカメラのほうを向く
     if (FACE_CAMERA.has(this.emote)) hipsRot[1] += Math.PI * this.poseWeight(et, 0);
     hipsRot[1] += this.spin;
 
     if (b.hips) b.hips.position.y = hipsY;
+    set(b.leftUpperLeg, ...lUpLeg);
+    set(b.rightUpperLeg, ...rUpLeg);
+    set(b.leftLowerLeg, ...lLowLeg);
+    set(b.rightLowerLeg, ...rLowLeg);
+    set(b.leftFoot, ...lFoot);
+    set(b.rightFoot, ...rFoot);
     set(b.hips, ...hipsRot);
     set(b.spine, ...spineRot);
     set(b.chest, ...chestRot);
@@ -335,7 +392,7 @@ export class VrmAnimator {
       if (x >= 1) this.blinkTime = -1;
     }
     // ふだんはほほえみ、エモート中は満面の笑み
-    const happyTarget = this.emote && !IDLE_EMOTES.includes(this.emote) ? 1 : 0.3;
+    const happyTarget = this.emote && !IDLE_EMOTES.includes(this.emote) ? 1 : this.sitting ? 0.6 : 0.3;
     const prev = em.getValue('happy') ?? 0;
     const happy = lerp(prev, happyTarget, Math.min(1, dt * 6));
     em.setValue('happy', happy);
