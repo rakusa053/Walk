@@ -27,8 +27,10 @@
   let loading = null;
   let lastUrl = '';
 
-  // ストリートビューの URL: /maps/@35.67,139.76,3a,75y,305.69h,63.68t/...
+  // ストリートビューの URL: /maps/@35.67,139.76,3a,75y,305.69h,63.68t/data=!3m6!1e1!3m4!...
+  // 航空写真の3D表示(…,600a,35y,39t/data=!3m1!1e3)も同じ形なので、data の !1e1 で見分ける
   function parseStreetView(url) {
+    if (!/!3m\d+!1e1(?!\d)/.test(url)) return null;
     const m = url.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)a((?:,[-\d.]+[a-z])*)/);
     if (!m) return null;
     const view = { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
@@ -78,7 +80,7 @@
     bar.classList.toggle('streetview', !!view);
     if (view && enabled) {
       const m = await loadModule();
-      if (lastUrl !== url) return;
+      if (lastUrl !== url || !enabled) return;
       if (document.getElementById('walk3d-sv-avatar')) m.updateView(view);
       else m.show(modelKey, view, onStatus).catch((e) => console.error('[Walk 3D]', e));
     } else if (sv) {
@@ -95,12 +97,19 @@
     check();
   });
 
-  chrome.storage.local.get(['svAvatar', 'walkState']).then(({ svAvatar, walkState }) => {
-    enabled = svAvatar !== false;
-    if (walkState?.model) modelKey = walkState.model;
-    render();
-    check();
-  });
+  chrome.storage.local
+    .get(['svAvatar', 'walkState'])
+    .then(({ svAvatar, walkState }) => {
+      enabled = svAvatar !== false;
+      if (walkState?.model) modelKey = walkState.model;
+    })
+    .finally(() => {
+      render();
+      check();
+      // Googleマップは画面遷移しても再読み込みしないので URL を監視する。
+      // 設定(ON/OFF・キャラクター)を読んでから始める(先に始めると OFF でも表示されることがある)
+      setInterval(check, 250);
+    });
   chrome.storage.onChanged.addListener((changes) => {
     const next = changes.walkState?.newValue?.model;
     if (next && next !== modelKey) {
@@ -112,6 +121,4 @@
   });
 
   render();
-  // Googleマップは画面遷移しても再読み込みしないので URL を監視する
-  setInterval(check, 250);
 })();

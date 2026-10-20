@@ -1,13 +1,18 @@
 // Googleマップの URL (…/@35.68,139.76,17z… や !3d35.68!4d139.76) から座標を取り出す
 function parseGoogleMapsUrl(url) {
   if (!url) return null;
-  let m = url.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
-  if (m) return { lat: m[1], lng: m[2] };
-  m = url.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
-  if (m) {
-    const h = url.match(/,(\d+(?:\.\d+)?)h/);
-    return { lat: m[1], lng: m[2], heading: h ? h[1] : undefined };
+  let m = url.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+  const h = url.match(/,(\d+(?:\.\d+)?)h/);
+  const view = m && { lat: m[1], lng: m[2], heading: h ? h[1] : undefined };
+  // ストリートビュー中は、いま立っている場所と向きから歩き始める
+  if (view && /!3m\d+!1e1(?!\d)/.test(url)) return view;
+  // 場所を選んでいるときはその場所。続けて別の場所を開くと前の場所も URL に残るので、最後のものを使う
+  const places = [...url.matchAll(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/g)];
+  if (places.length) {
+    const [, lat, lng] = places[places.length - 1];
+    return { lat, lng };
   }
+  if (view) return view;
   m = url.match(/[?&](?:q|ll|query)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
   if (m) return { lat: m[1], lng: m[2] };
   return null;

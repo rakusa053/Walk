@@ -53,9 +53,11 @@ export class VrmAnimator {
     const up = this.bones.leftUpperLeg;
     const foot = this.bones.leftFoot;
     if (!up || !foot) return 0.8;
-    const a = up.getWorldPosition(new THREE.Vector3());
-    const b = foot.getWorldPosition(new THREE.Vector3());
-    return Math.max(0.3, a.distanceTo(b));
+    // 3Dマップではアバターを「大きさ」の倍率で拡大して描くので、その倍率を含まないモデル自身の座標で測る
+    const scene = this.vrm.scene;
+    const a = scene.worldToLocal(up.getWorldPosition(new THREE.Vector3()));
+    const b = scene.worldToLocal(foot.getWorldPosition(new THREE.Vector3()));
+    return Math.max(0.3, a.distanceTo(b) * scene.scale.y);
   }
 
   startEmote(name) {

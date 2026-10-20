@@ -532,9 +532,11 @@ function setupUi() {
   $('model-file').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    const seq = ++modelLoadSeq;
     const url = URL.createObjectURL(file);
     try {
       const gltf = await createLoader().loadAsync(url);
+      if (seq !== modelLoadSeq) return;
       setModel(gltf);
       $('model-name').textContent = file.name;
       $('model-select').value = '';
@@ -633,11 +635,16 @@ function setupUi() {
   setInterval(saveState, 3000);
 }
 
+// 読み込みが前後しても、最後に選んだモデルだけを使う(軽いロボットが先に読み込み終わることがある)
+let modelLoadSeq = 0;
+
 async function loadBuiltinModel(key) {
+  const seq = ++modelLoadSeq;
   const m = BUILTIN_MODELS[key] || BUILTIN_MODELS.girl;
   $('model-name').textContent = '読み込み中…';
   const url = builtinModelUrl(key);
   const gltf = await createLoader().loadAsync(url);
+  if (seq !== modelLoadSeq) return;
   setModel(gltf);
   $('model-name').textContent = m.label;
 }
