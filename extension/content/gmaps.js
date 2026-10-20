@@ -35,13 +35,32 @@
     for (const [, v, k] of m[4].matchAll(/,([-\d.]+)([a-z])/g)) {
       if (k === 'h') view.heading = parseFloat(v);
       if (k === 't') view.tilt = parseFloat(v);
+      if (k === 'y') view.fov = parseFloat(v);
     }
     return view;
   }
 
+  // 奥行き推定の状態: idle / loading / ok / error
+  let depthStatus = 'idle';
+  let depthMessage = '';
+  const STATUS_TITLE = {
+    idle: 'ストリートビューにアバターを表示する',
+    loading: '奥行きを推定中…(初回はAIモデルのダウンロードに少し時間がかかります)',
+    ok: '奥行き推定OK:建物や人の後ろに隠れ、地面の高さに合わせて立ちます',
+    error: '奥行きを推定できませんでした(アバターは手前に表示されます)',
+  };
+
   function render() {
-    avatarBtn.innerHTML = `<span class="walk3d-icon">👧</span><span>アバター ${enabled ? 'ON' : 'OFF'}</span>`;
+    const dot = enabled && depthStatus !== 'idle' ? `<span class="walk3d-dot ${depthStatus}"></span>` : '';
+    avatarBtn.innerHTML = `<span class="walk3d-icon">👧</span><span>アバター ${enabled ? 'ON' : 'OFF'}</span>${dot}`;
     avatarBtn.classList.toggle('off', !enabled);
+    avatarBtn.title = STATUS_TITLE[depthStatus] + (depthStatus === 'error' && depthMessage ? `\n${depthMessage}` : '');
+  }
+
+  function onStatus(status, message = '') {
+    depthStatus = status;
+    depthMessage = message;
+    render();
   }
 
   async function loadModule() {
@@ -61,7 +80,7 @@
       const m = await loadModule();
       if (lastUrl !== url) return;
       if (document.getElementById('walk3d-sv-avatar')) m.updateView(view);
-      else m.show(modelKey, view).catch((e) => console.error('[Walk 3D]', e));
+      else m.show(modelKey, view, onStatus).catch((e) => console.error('[Walk 3D]', e));
     } else if (sv) {
       sv.hide();
     }

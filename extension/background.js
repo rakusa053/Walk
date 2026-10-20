@@ -46,3 +46,52 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     openWalk(parseGoogleMapsUrl(msg.url) || parseGoogleMapsUrl(sender.tab?.url));
   }
 });
+
+// ---------------------------------------------------------------------------
+// ストリートビュー: 画面キャプチャと奥行き推定
+// ---------------------------------------------------------------------------
+let offscreenReady = null;
+
+function ensureOffscreen() {
+  if (!offscreenReady) {
+    offscreenReady = (async () => {
+      const contexts = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+      if (contexts.length) return;
+      await chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: ['WORKERS'],
+        justification: 'ストリートビュー画像の奥行きを推定して、アバターを建物の後ろに隠したり地面の高さに合わせたりするため',
+      });
+    })().catch((e) => {
+      offscreenReady = null;
+      throw e;
+    });
+  }
+  return offscreenReady;
+}
+
+// テストで差し替えられるように self に置く
+self.estimateDepth = async (dataUrl) => {
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'depth', dataUrl });
+  if (!res || res.error) throw new Error(res?.error || '奥行き推定に失敗しました');
+  return res.depth;
+};
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === 'sv-capture') {
+    chrome.tabs
+      .captureVisibleTab(sender.tab.windowId, { format: 'jpeg', quality: 75 })
+      .then((dataUrl) => sendResponse({ dataUrl }))
+      .catch((e) => sendResponse({ error: String(e?.message || e) }));
+    return true;
+  }
+  if (msg?.type === 'sv-depth') {
+    self
+      .estimateDepth(msg.dataUrl)
+      .then((depth) => sendResponse({ depth }))
+      .catch((e) => sendResponse({ error: String(e?.message || e) }));
+    return true;
+  }
+  return false;
+});

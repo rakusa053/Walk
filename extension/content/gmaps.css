@@ -30,14 +30,19 @@
 #walk3d-buttons button.walk3d-toggle { background: #e8467c; }
 #walk3d-buttons button.walk3d-toggle.off { background: #5f6368; }
 #walk3d-buttons .walk3d-icon { font-size: 16px; }
+.walk3d-dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; opacity: .6; }
+.walk3d-dot.loading { background: #fbbc04; opacity: 1; animation: walk3d-pulse 1s infinite alternate; }
+.walk3d-dot.ok { background: #34a853; opacity: 1; box-shadow: 0 0 0 2px rgba(255,255,255,.8); }
+.walk3d-dot.error { background: #5f6368; opacity: 1; box-shadow: 0 0 0 2px rgba(255,255,255,.8); }
+@keyframes walk3d-pulse { to { opacity: .3; } }
 
 #walk3d-sv-avatar {
   position: fixed;
   left: 50%;
   bottom: 0;
   transform: translateX(-50%);
-  width: min(560px, 50vw);
-  height: 62vh;
+  width: 100vw;
+  height: 100vh;
   z-index: 2147482000;
   pointer-events: none;
 }
