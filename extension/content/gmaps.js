@@ -65,6 +65,12 @@
     render();
   }
 
+  // アバターを消すときは、奥行き推定の状態(ボタンの丸)も消す
+  function hideAvatar() {
+    sv.hide();
+    onStatus('idle');
+  }
+
   async function loadModule() {
     if (sv) return sv;
     if (!loading) loading = import(chrome.runtime.getURL('build/streetview.js'));
@@ -84,8 +90,7 @@
       if (document.getElementById('walk3d-sv-avatar')) m.updateView(view);
       else m.show(modelKey, view, onStatus).catch((e) => console.error('[Walk 3D]', e));
     } else if (sv) {
-      sv.hide();
-      onStatus('idle');
+      hideAvatar();
     }
   }
 
@@ -114,7 +119,7 @@
     const next = changes.walkState?.newValue?.model;
     if (next && next !== modelKey) {
       modelKey = next;
-      if (sv) sv.hide();
+      if (sv) hideAvatar();
       lastUrl = '';
       check();
     }

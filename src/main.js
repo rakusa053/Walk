@@ -350,7 +350,12 @@ function setTarget(lngLat) {
     targetMarker = new maplibregl.Marker({ element: el, anchor: 'bottom' });
   }
   targetMarker.setLngLat(lngLat).addTo(map);
-  state.emote = null;
+  // 歩き出す前に、いまのエモートをやめる(ジャンプは着地まで続ける)。VRM のアニメーションにも伝えないと、
+  // すぐ近くをクリックして歩かなかったとき、ダンスだけが続いて 3 キーで止められなくなる
+  if (state.emote !== 'jump') {
+    state.emote = null;
+    avatar.animator?.stopEmote();
+  }
 }
 
 function clearTarget() {

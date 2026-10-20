@@ -549,6 +549,8 @@ export async function show(modelKey, view, onStatus) {
 
 export function hide() {
   if (!ctx) return;
+  // 推定の途中で隠したとき、あとから届いた結果でボタンの丸が「推定中」などに戻らないようにする
+  ctx.onStatus = null;
   cancelAnimationFrame(ctx.raf);
   window.removeEventListener('resize', ctx.onResize);
   window.removeEventListener('keydown', ctx.onKeyDown, true);
