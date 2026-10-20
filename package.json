@@ -1,0 +1,14 @@
+{
+  "name": "walk-3d-map-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "3Dマップをアバターと一緒に歩くChrome拡張",
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "maplibre-gl": "^6.15.0",
+    "three": "^0.186.1"
+  }
+}

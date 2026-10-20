@@ -1,0 +1,19 @@
+#walk3d-button {
+  position: fixed;
+  right: 72px;
+  bottom: 24px;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 999px;
+  background: #1a73e8;
+  color: #fff;
+  font: 600 14px/1 "Google Sans", Roboto, "Noto Sans JP", sans-serif;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+#walk3d-button:hover { background: #1765cc; }
+#walk3d-button .walk3d-icon { font-size: 16px; }

@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Walk 3D - アバターと3Dマップを歩こう",
+  "short_name": "Walk 3D",
+  "version": "1.0.0",
+  "description": "Googleマップのような3Dマップの街並みを、3Dモデルのアバターと一緒に歩けます。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "3Dマップを歩く",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["storage", "activeTab", "contextMenus", "geolocation"],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/maps*",
+        "https://www.google.co.jp/maps*",
+        "https://maps.google.com/*",
+        "https://maps.google.co.jp/*"
+      ],
+      "js": ["content/gmaps.js"],
+      "css": ["content/gmaps.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

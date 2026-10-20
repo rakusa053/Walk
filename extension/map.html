@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Walk 3D</title>
+  <link rel="icon" href="icons/icon32.png">
+  <link rel="stylesheet" href="build/maplibre-gl.css">
+  <link rel="stylesheet" href="map.css">
+  <script type="module" src="build/app.js"></script>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="loading">3Dマップを読み込み中…</div>
+
+  <div id="topbar">
+    <form id="search-form" autocomplete="off">
+      <span class="search-icon">🔍</span>
+      <input id="search-input" type="search" placeholder="場所を検索(例: 渋谷駅、35.68,139.76)">
+    </form>
+    <ul id="search-results" hidden></ul>
+  </div>
+
+  <div id="hud">
+    <div><span class="label">歩いた距離</span><strong id="hud-distance">0 m</strong></div>
+    <div><span class="label">歩数</span><strong id="hud-steps">0</strong></div>
+    <div class="coords" id="hud-coords"></div>
+  </div>
+
+  <aside id="panel">
+    <button id="btn-panel" class="panel-toggle" type="button" title="パネルの開閉">☰</button>
+    <div class="panel-body">
+      <h2>アバター</h2>
+      <div class="row model-row">
+        <span id="model-name">読み込み中…</span>
+      </div>
+      <div class="row buttons">
+        <label class="btn">3Dモデルを読み込む (.glb)<input id="model-file" type="file" accept=".glb,.gltf" hidden></label>
+        <button id="model-reset" class="btn ghost" type="button">標準に戻す</button>
+      </div>
+      <label class="row slider">
+        <span>大きさ <em id="size-val"></em></span>
+        <input id="size" type="range" min="1" max="10" step="0.5">
+      </label>
+      <label class="row slider">
+        <span>速さ <em id="speed-val"></em></span>
+        <input id="speed" type="range" min="0.5" max="5" step="0.5">
+      </label>
+      <label class="row check">
+        <input id="follow" type="checkbox"> カメラを背後に追従 (C)
+      </label>
+
+      <h2>場所</h2>
+      <div class="row buttons">
+        <button id="btn-locate" class="btn" type="button">📍 現在地へ</button>
+        <button id="btn-gmaps" class="btn ghost" type="button">Googleマップで見る</button>
+        <button id="btn-streetview" class="btn ghost" type="button">ストリートビュー</button>
+        <button id="btn-reset-distance" class="btn ghost" type="button">距離をリセット</button>
+      </div>
+      <button id="btn-help" class="btn ghost wide" type="button">操作方法 (H)</button>
+    </div>
+  </aside>
+
+  <div id="help" hidden>
+    <h3>操作方法</h3>
+    <dl>
+      <dt>W / ↑</dt><dd>前に歩く</dd>
+      <dt>S / ↓</dt><dd>後ろに下がる</dd>
+      <dt>A D / ← →</dt><dd>向きを変える</dd>
+      <dt>Shift</dt><dd>走る</dd>
+      <dt>クリック</dt><dd>その場所まで自動で歩く</dd>
+      <dt>ドラッグ</dt><dd>カメラを回す・傾ける</dd>
+      <dt>ホイール</dt><dd>ズーム</dd>
+      <dt>Space</dt><dd>ジャンプ</dd>
+      <dt>1 / 2 / 3</dt><dd>手を振る / いいね / ダンス</dd>
+      <dt>F または /</dt><dd>場所を検索</dd>
+      <dt>Esc</dt><dd>自動歩行をやめる</dd>
+    </dl>
+  </div>
+</body>
+</html>
