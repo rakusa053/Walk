@@ -11,7 +11,11 @@ import { VrmAnimator } from './vrm-animator.js';
 
 const AVATAR_HEIGHT_M = 1.7;
 const CAMERA_HEIGHT_M = 2.5; // ストリートビューのカメラの高さ(撮影車のおおよその値)
-const AVATAR_DIST_M = 3.5; // カメラからアバターまでの距離
+// アバターまでの距離は、水平に見たとき足元が画面の中心から下端までの 8 割の位置に来るように決める
+// (URL の画角は横なので、横長の画面ほど縦の画角が狭くなり、近いと足が画面の外に出る)
+const FEET_ON_SCREEN = 0.8;
+const MIN_DIST_M = 4;
+const MAX_DIST_M = 12;
 const WALK_AFTER_MOVE = 1.2; // パノラマが切り替わったあと歩き続ける秒数
 const SETTLE_MS = 700; // 視点が止まってから奥行きを推定するまでの時間
 const NEAR = 0.1;
@@ -80,34 +84,46 @@ function rayFor(u, v, cam) {
 }
 
 // 相対的な逆深度 disp を、距離 z[m] に換算する係数 (disp ≒ a / z + b) を求める。
-// 画面下側は「カメラの真下から続く平らな地面」とみなして当てはめる。
+// 画面の中央の帯にある「地平線より下の点」を平らな地面(カメラ高 CAMERA_HEIGHT_M)とみなし、
+// その中で一番多くの点が乗る直線を RANSAC で探す。路地の壁や人・車は直線に乗らないので外れる
 function calibrate(depth, cam) {
   const { width: w, height: h, data } = depth;
-  let pts = [];
-  for (let j = Math.floor(h * 0.55); j < h; j += 1) {
-    for (let i = Math.floor(w * 0.2); i < w * 0.8; i += 2) {
+  const pts = [];
+  for (let j = 0; j < h; j++) {
+    for (let i = Math.floor(w * 0.35); i < w * 0.65; i += 2) {
       const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
-      if (r.y > -0.2) continue; // 地平線に近すぎる点は使わない
+      if (r.y > -0.05) continue; // 地平線に近すぎる点は使わない
       const zGround = CAMERA_HEIGHT_M / -r.y;
-      if (zGround > 25) continue;
+      if (zGround > 12) continue;
       pts.push([1 / zGround, data[j * w + i]]);
     }
   }
   if (pts.length < 30) return null;
-  // 一番近い地面ほど「足元と同じ高さ」の可能性が高いので、近い半分だけで当てはめる
-  pts.sort((p, q) => q[0] - p[0]);
-  pts = pts.slice(0, Math.max(30, Math.floor(pts.length / 2)));
-  let fit = null;
-  for (let pass = 0; pass < 3; pass++) {
-    fit = linearFit(pts);
-    if (!fit || fit.a <= 0) return null;
-    const res = pts.map(([x, y]) => Math.abs(y - (fit.a * x + fit.b)));
-    const sorted = [...res].sort((p, q) => p - q);
-    const limit = Math.max(1e-6, sorted[Math.floor(sorted.length * 0.6)] * 2.5);
-    pts = pts.filter((_, k) => res[k] <= limit); // 人や車など地面でない点を外す
-    if (pts.length < 30) return null;
+
+  const ys = pts.map((p) => p[1]).sort((p, q) => p - q);
+  const tol = (ys[Math.floor(ys.length * 0.95)] - ys[Math.floor(ys.length * 0.05)]) * 0.04;
+  let seed = 1; // 毎回同じ結果になるよう乱数は固定
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  let best = null;
+  let bestCount = 0;
+  for (let k = 0; k < 300; k++) {
+    const p = pts[Math.floor(rand() * pts.length)];
+    const q = pts[Math.floor(rand() * pts.length)];
+    if (Math.abs(p[0] - q[0]) < 1e-3) continue;
+    const a = (p[1] - q[1]) / (p[0] - q[0]);
+    if (a <= 0) continue;
+    const b = p[1] - a * p[0];
+    let count = 0;
+    for (const [x, y] of pts) if (Math.abs(y - (a * x + b)) < tol) count++;
+    if (count > bestCount) {
+      bestCount = count;
+      best = { a, b };
+    }
   }
-  return fit;
+  // 地面がほとんど見えていない(壁ばかりなど)ときは、当てにならないので使わない
+  if (!best || bestCount < Math.max(30, pts.length * 0.25)) return null;
+  const fit = linearFit(pts.filter(([x, y]) => Math.abs(y - (best.a * x + best.b)) < tol));
+  return fit && fit.a > 0 ? fit : null;
 }
 
 function linearFit(pts) {
@@ -133,14 +149,17 @@ function buildDepthField(depth, cam) {
     metric[k] = den > 1e-6 ? Math.min(FAR, Math.max(NEAR, fit.a / den)) : FAR;
   }
 
-  // 画面中央の縦の帯で、アバターの距離あたりにある点の高さを集める
+  // 画面中央の縦の帯で、アバターの距離あたりにある点の高さを集める。
+  // 足元の地面が画面の外(下)にあるときは、手前の車などを地面と取り違えるので集めない
   const heights = [];
-  for (let j = 0; j < h; j++) {
+  const bottom = rayFor(0.5, 1, cam);
+  const feetVisible = bottom.y < 0 && (CAMERA_HEIGHT_M / -bottom.y) * -bottom.z < cam.dist - 0.45;
+  for (let j = 0; feetVisible && j < h; j++) {
     for (let i = Math.floor(w * 0.4); i < w * 0.6; i++) {
       const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
       const z = metric[j * w + i];
       const forward = -r.z * z;
-      if (Math.abs(forward - AVATAR_DIST_M) > 0.45) continue;
+      if (Math.abs(forward - cam.dist) > 0.45) continue;
       const y = CAMERA_HEIGHT_M + r.y * z; // 足元の地面を 0 とした高さ
       if (y < CAMERA_HEIGHT_M - 0.3) heights.push(y);
     }
@@ -187,7 +206,6 @@ function createOverlay() {
 
   // アバターの立つ場所(地面の高さはここで合わせる)
   const spot = new THREE.Group();
-  spot.position.set(0, 0, -AVATAR_DIST_M);
   scene.add(spot);
 
   const shadowGeo = new THREE.CircleGeometry(0.42, 32);
@@ -216,6 +234,7 @@ function createOverlay() {
     depthKey: '', // 奥行きを推定済み(または推定中)の視点
     depthBusy: false,
     depthFailed: 0,
+    blankTries: 0,
     ground: 0,
     groundTarget: 0,
     walkTimer: 0,
@@ -248,13 +267,10 @@ function createOverlay() {
     } else if (e.code === 'ArrowDown' || e.code === 'KeyS') {
       c.walkTimer = Math.max(c.walkTimer, 0.6);
       c.walkDir = -1;
-    } else if (!e.repeat && e.code === 'Digit1') {
-      triggerEmote(c, 'wave');
-    } else if (!e.repeat && e.code === 'Digit2') {
-      triggerEmote(c, 'thumbsup');
-    } else if (!e.repeat && e.code === 'Digit3') {
-      if (c.emote === 'dance') stopEmote(c);
-      else triggerEmote(c, 'dance');
+    } else if (!e.repeat && EMOTE_KEYS[e.code]) {
+      const name = EMOTE_KEYS[e.code];
+      if (name === 'dance' && c.emote === 'dance') stopEmote(c);
+      else triggerEmote(c, name);
     }
   };
   window.addEventListener('keydown', c.onKeyDown, true);
@@ -303,11 +319,16 @@ function setModel(c, gltf) {
     wave: findClip(clips, [/wave/i]),
     thumbsup: findClip(clips, [/thumb/i, /yes/i]),
     dance: findClip(clips, [/dance/i]),
+    peace: findClip(clips, [/peace/i, /yes/i]),
+    bow: findClip(clips, [/bow/i]),
+    spin: findClip(clips, [/spin/i, /turn/i]),
+    lookaround: findClip(clips, [/look/i]),
+    stretch: findClip(clips, [/stretch/i]),
   };
   for (const [name, clip] of Object.entries(pick)) {
     if (!clip) continue;
     const a = c.mixer.clipAction(clip);
-    if (name === 'wave' || name === 'thumbsup') {
+    if (name !== 'idle' && name !== 'walk' && name !== 'dance') {
       a.setLoop(THREE.LoopOnce, 1);
       a.clampWhenFinished = true;
     }
@@ -317,6 +338,12 @@ function setModel(c, gltf) {
     c.emote = null;
   });
 }
+
+// 数字キー → エモート(3 のダンスだけは、もう一度押すまで続く)
+const EMOTE_KEYS = {
+  Digit1: 'wave', Digit2: 'thumbsup', Digit3: 'dance', Digit4: 'peace',
+  Digit5: 'bow', Digit6: 'spin', Digit7: 'lookaround', Digit8: 'stretch',
+};
 
 function triggerEmote(c, name) {
   c.walkTimer = 0;
@@ -342,8 +369,15 @@ function playAction(c, name) {
 }
 
 function cameraParams(c) {
-  return { fov: c.camera.fov, aspect: c.camera.aspect, pitch: toDegPitch(c.view) };
+  return { fov: c.camera.fov, aspect: c.camera.aspect, pitch: toDegPitch(c.view), dist: avatarDistance(c.camera.fov) };
 }
+
+const avatarDistance = (vfov) =>
+  Math.max(MIN_DIST_M, Math.min(MAX_DIST_M, CAMERA_HEIGHT_M / (FEET_ON_SCREEN * Math.tan(toRad(vfov) / 2))));
+
+// URL の y は横の画角(Google の Maps URLs の fov と同じ)。three.js のカメラは縦の画角なので換算する
+const verticalFov = (hfov, aspect) =>
+  Number.isFinite(hfov) ? (2 * Math.atan(Math.tan(toRad(hfov) / 2) / aspect) * 180) / Math.PI : NaN;
 
 // URL の t は 90 が水平、小さいほど下向き
 const toDegPitch = (view) => Math.max(-80, Math.min(80, (view?.tilt ?? 90) - 90));
@@ -372,11 +406,12 @@ function update(c, dt) {
   }
 
   // ストリートビューと同じカメラ(画角・上下の向き)で描く
-  const fov = c.view?.fov;
+  const fov = verticalFov(c.view?.fov, c.camera.aspect);
   if (Number.isFinite(fov) && Math.abs(c.camera.fov - fov) > 0.01) {
-    c.camera.fov = Math.max(10, Math.min(120, fov));
+    c.camera.fov = Math.max(5, Math.min(120, fov));
     c.camera.updateProjectionMatrix();
   }
+  c.spot.position.z = -avatarDistance(c.camera.fov);
   c.camera.rotation.set(toRad(toDegPitch(c.view)), 0, 0);
 
   c.renderer.render(c.scene, c.camera);
@@ -393,6 +428,7 @@ function viewKeyOf(view) {
 function invalidateDepth(c) {
   c.occluder.visible = false;
   c.depthKey = '';
+  c.blankTries = 0;
   c.viewChangedAt = performance.now();
 }
 
@@ -427,6 +463,12 @@ async function maybeEstimateDepth(c) {
     const res = await chrome.runtime.sendMessage({ type: 'sv-depth', dataUrl: shot.dataUrl });
     if (!res || res.error) throw new Error(res?.error || 'depth failed');
     if (!ctx || c !== ctx || c.viewKey !== key) return;
+    if (res.depth.blank) {
+      // パノラマの読み込み中(画面が真っ黒など)。失敗には数えず、少し待ってやり直す
+      c.depthKey = '';
+      c.viewChangedAt = performance.now() + Math.min(8000, 500 * 2 ** c.blankTries++);
+      return;
+    }
     applyDepth(c, res.depth, cam);
     c.depthFailed = 0;
   } catch (e) {
@@ -520,4 +562,4 @@ export function hide() {
 }
 
 // テスト用
-export const _internal = { buildDepthField, rayFor, CAMERA_HEIGHT_M, AVATAR_DIST_M };
+export const _internal = { buildDepthField, rayFor, CAMERA_HEIGHT_M };

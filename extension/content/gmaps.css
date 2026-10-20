@@ -7,9 +7,9 @@
   display: flex;
   gap: 8px;
 }
-/* ストリートビュー中はアバターと重ならないよう上に出す */
+/* ストリートビュー中はアバターと重ならないよう上に出す(検索欄の横の「あ」入力ツールと重ならない高さ) */
 #walk3d-buttons.streetview {
-  top: 20px;
+  top: 76px;
   bottom: auto;
 }
 #walk3d-buttons:not(.streetview) .walk3d-toggle { display: none; }

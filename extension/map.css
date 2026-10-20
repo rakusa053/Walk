@@ -61,6 +61,7 @@ body.panel-collapsed .panel-body { display: none; }
 .btn.ghost { background: transparent; color: var(--accent); border-color: var(--border); }
 .btn:hover { filter: brightness(1.08); }
 .btn.wide { width: 100%; margin-top: 8px; }
+.emotes .btn { min-width: 0; padding: 6px 0; flex: 1 0 20%; font-size: 18px; line-height: 1; }
 @media (prefers-color-scheme: dark) { .btn:not(.ghost) { color: #202124; } }
 .slider { display: grid; gap: 4px; }
 .slider span { display: flex; justify-content: space-between; }

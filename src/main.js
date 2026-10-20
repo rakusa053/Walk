@@ -141,6 +141,11 @@ function setModel(gltf) {
     wave: findClip(clips, [/wave/i, /hello/i]),
     thumbsup: findClip(clips, [/thumb/i, /yes/i]),
     dance: findClip(clips, [/dance/i]),
+    peace: findClip(clips, [/peace/i, /yes/i]),
+    bow: findClip(clips, [/bow/i]),
+    spin: findClip(clips, [/spin/i, /turn/i]),
+    lookaround: findClip(clips, [/look/i]),
+    stretch: findClip(clips, [/stretch/i]),
   };
   if (!pick.walk) pick.walk = pick.run || pick.idle || clips[0] || null;
   if (!pick.run) pick.run = pick.walk;
@@ -150,7 +155,7 @@ function setModel(gltf) {
   for (const [name, clip] of Object.entries(pick)) {
     if (!clip) continue;
     const action = mixer.clipAction(clip);
-    if (['jump', 'wave', 'thumbsup'].includes(name)) {
+    if (ONE_SHOT_EMOTES.includes(name)) {
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
     }
@@ -164,6 +169,13 @@ function setModel(gltf) {
   playAction('idle');
   state.dirty = true;
 }
+
+const ONE_SHOT_EMOTES = ['jump', 'wave', 'thumbsup', 'peace', 'bow', 'spin', 'lookaround', 'stretch'];
+// 数字キー → エモート(3 のダンスだけは、もう一度押すまで続く)
+const EMOTE_KEYS = {
+  Digit1: 'wave', Digit2: 'thumbsup', Digit3: 'dance', Digit4: 'peace',
+  Digit5: 'bow', Digit6: 'spin', Digit7: 'lookaround', Digit8: 'stretch',
+};
 
 function playAction(name, fade = 0.25) {
   const next = avatar.actions[name];
@@ -190,6 +202,15 @@ function triggerEmote(name) {
   clearTarget();
   if (avatar.current === action) action.reset().play();
   state.emote = name;
+}
+
+function toggleEmote(name) {
+  if (name === 'dance' && state.emote === 'dance') {
+    state.emote = null;
+    avatar.animator?.stopEmote();
+  } else {
+    triggerEmote(name);
+  }
 }
 
 function buildShadow() {
@@ -439,6 +460,12 @@ function updateHud() {
 }
 
 function setupUi() {
+  // モーションのボタン(数字キーと同じ)
+  $('emote-buttons').addEventListener('click', (e) => {
+    const name = e.target.closest('[data-emote]')?.dataset.emote;
+    if (name) toggleEmote(name);
+  });
+
   // 検索(Nominatim / OpenStreetMap)
   const form = $('search-form');
   const results = $('search-results');
@@ -577,20 +604,14 @@ function setupUi() {
       return;
     }
     keys.add(e.code);
+    if (EMOTE_KEYS[e.code]) {
+      toggleEmote(EMOTE_KEYS[e.code]);
+      return;
+    }
     switch (e.code) {
       case 'Space':
         e.preventDefault();
         triggerEmote('jump');
-        break;
-      case 'Digit1':
-        triggerEmote('wave');
-        break;
-      case 'Digit2':
-        triggerEmote('thumbsup');
-        break;
-      case 'Digit3':
-        if (state.emote === 'dance') state.emote = null;
-        else triggerEmote('dance');
         break;
       case 'KeyC':
         state.follow = !state.follow;

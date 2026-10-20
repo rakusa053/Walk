@@ -4,7 +4,14 @@ import * as THREE from 'three';
 // 正規化ボーンを手続き的に動かして歩く・走る・手を振るなどを表現する。
 // 正規化ボーンの座標系: +Y=上, +Z=前, +X=キャラクターの左。
 
-const EMOTE_DURATION = { jump: 0.9, wave: 2.4, thumbsup: 1.8 };
+const EMOTE_DURATION = {
+  jump: 0.9, wave: 2.4, thumbsup: 1.8,
+  peace: 2.6, bow: 2.6, spin: 1.3, lookaround: 3.4, stretch: 2.6,
+};
+// こちら(カメラ側)を向いてから行うエモート。ふだんは後ろ姿なので、振り返って見せる
+const FACE_CAMERA = new Set(['peace', 'bow']);
+// しばらく立ち止まっていると、自分から行う動き
+const IDLE_EMOTES = ['lookaround', 'stretch'];
 
 const lerp = (a, b, t) => a + (b - a) * t;
 const smooth = (x) => x * x * (3 - 2 * x);
@@ -18,6 +25,10 @@ export class VrmAnimator {
       'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot',
       'leftShoulder', 'leftUpperArm', 'leftLowerArm', 'leftHand',
       'rightShoulder', 'rightUpperArm', 'rightLowerArm', 'rightHand',
+      'rightThumbMetacarpal', 'rightThumbProximal', 'rightThumbDistal',
+      'rightIndexProximal', 'rightMiddleProximal',
+      'rightRingProximal', 'rightRingIntermediate', 'rightRingDistal',
+      'rightLittleProximal', 'rightLittleIntermediate', 'rightLittleDistal',
     ];
     for (const n of names) this.bones[n] = vrm.humanoid?.getNormalizedBoneNode(n) || null;
     this.hipsRestY = this.bones.hips ? this.bones.hips.position.y : 0;
@@ -33,6 +44,9 @@ export class VrmAnimator {
     this.nextBlink = 2;
     this.blinkTime = -1;
     this.onEmoteEnd = null;
+    this.spin = 0;
+    this.idleTime = 0;
+    this.nextIdleEmote = 10 + Math.random() * 8;
   }
 
   estimateLegLength() {
@@ -82,6 +96,18 @@ export class VrmAnimator {
     }
     this.emoteWeight = emoteW;
 
+    // 立ち止まってしばらくすると、見回したり伸びをしたりする
+    if (moving || this.emote) {
+      this.idleTime = 0;
+    } else {
+      this.idleTime += dt;
+      if (this.idleTime > this.nextIdleEmote) {
+        this.startEmote(IDLE_EMOTES[Math.floor(Math.random() * IDLE_EMOTES.length)]);
+        this.idleTime = 0;
+        this.nextIdleEmote = 12 + Math.random() * 10;
+      }
+    }
+
     this.pose(dt);
     this.updateFace(dt);
     this.vrm.update(dt);
@@ -129,6 +155,7 @@ export class VrmAnimator {
     let chestRot = [breath, -s * 0.06 * mw, 0];
     let headRot = [-lerp(0.03, 0.18, rw) * mw - breath, 0, Math.sin(t * 0.7) * 0.04 * (1 - mw)];
     this.lift = 0;
+    let fingerCurl = 0; // ピースのときに薬指・小指・親指を曲げる
 
     // --- エモート ---
     const ew = this.emoteWeight;
@@ -188,9 +215,76 @@ export class VrmAnimator {
           set(b.rightLowerLeg, Math.max(0, -bs) * 0.5 * ew, 0, 0);
           break;
         }
+        case 'peace': {
+          // 振り返って、顔の横でピース。首をかしげてウインク
+          const w = this.poseWeight(et, 0.35);
+          rArm = mix(rArm, [-0.55, 0.2, 0.75], w);
+          rFore = mix(rFore, [0, 2.0, 0], w);
+          rHand = mix(rHand, [0, -0.3, -0.35], w);
+          lArm = mix(lArm, [0.05, 0, -1.25], w);
+          headRot = mix(headRot, [0.05, 0, -0.22], w);
+          spineRot = mix(spineRot, [0, 0, 0.06], w);
+          hipsRot = mix(hipsRot, [0, 0, -0.05], w);
+          fingerCurl = w;
+          break;
+        }
+        case 'bow': {
+          // 振り返って、手を前でそろえておじぎ
+          const w = this.poseWeight(et, 0.45);
+          const dip = smooth(Math.min(1, Math.max(0, (et - 0.6) / 0.5))) * smooth(Math.min(1, Math.max(0, (EMOTE_DURATION.bow - 0.55 - et) / 0.5)));
+          lArm = mix(lArm, [-0.45, 0, -1.5], w);
+          rArm = mix(rArm, [-0.45, 0, 1.5], w);
+          lFore = mix(lFore, [0, -0.9, 0], w);
+          rFore = mix(rFore, [0, 0.9, 0], w);
+          hipsRot = mix(hipsRot, [0.3 * dip, 0, 0], w);
+          spineRot = mix(spineRot, [0.55 * dip, 0, 0], w);
+          chestRot = mix(chestRot, [0.2 * dip, 0, 0], w);
+          headRot = mix(headRot, [0.25 * dip, 0, 0], w);
+          break;
+        }
+        case 'spin': {
+          // くるっと一回転
+          const turn = smooth(Math.min(1, et / EMOTE_DURATION.spin));
+          this.spin = turn * Math.PI * 2;
+          this.lift = Math.sin(turn * Math.PI) * 0.06 * ew;
+          lArm = mix(lArm, [0, 0, -0.55], ew);
+          rArm = mix(rArm, [0, 0, 0.55], ew);
+          lFore = mix(lFore, [0, -0.3, 0], ew);
+          rFore = mix(rFore, [0, 0.3, 0], ew);
+          headRot = mix(headRot, [-0.1, 0, 0], ew);
+          break;
+        }
+        case 'lookaround': {
+          // 手をおでこにかざして、左右をきょろきょろ
+          const look = Math.sin((et / EMOTE_DURATION.lookaround) * Math.PI * 2) * 0.75;
+          rArm = mix(rArm, [-0.9, 0.3, 0.35], ew);
+          rFore = mix(rFore, [0, 2.1, 0], ew);
+          rHand = mix(rHand, [0, 0, 0.3], ew);
+          headRot = mix(headRot, [-0.08, look, 0], ew);
+          chestRot = mix(chestRot, [0, look * 0.35, 0], ew);
+          break;
+        }
+        case 'stretch': {
+          // 両手を上にのばして、つま先立ちで伸び
+          const up = Math.sin(Math.min(1, et / (EMOTE_DURATION.stretch * 0.8)) * Math.PI);
+          lArm = mix(lArm, [-0.1, 0, 1.35], ew);
+          rArm = mix(rArm, [-0.1, 0, -1.35], ew);
+          lFore = mix(lFore, [0, -0.15, 0], ew);
+          rFore = mix(rFore, [0, 0.15, 0], ew);
+          spineRot = mix(spineRot, [-0.18 * up, 0, 0], ew);
+          headRot = mix(headRot, [-0.3 * up, 0, 0], ew);
+          this.lift = 0.04 * up * ew;
+          set(b.leftFoot, 0.35 * up * ew, 0, 0);
+          set(b.rightFoot, 0.35 * up * ew, 0, 0);
+          break;
+        }
         default:
       }
     }
+    if (this.emote !== 'spin') this.spin = 0;
+    // 振り返るエモートは、体ごとカメラのほうを向く
+    if (FACE_CAMERA.has(this.emote)) hipsRot[1] += Math.PI * this.poseWeight(et, 0);
+    hipsRot[1] += this.spin;
 
     if (b.hips) b.hips.position.y = hipsY;
     set(b.hips, ...hipsRot);
@@ -203,6 +297,23 @@ export class VrmAnimator {
     set(b.rightLowerArm, ...rFore);
     set(b.leftHand, ...lHand);
     set(b.rightHand, ...rHand);
+
+    // 指(右手)。ピースは人差し指と中指を開いて、ほかを握る
+    const curl = 1.3 * fingerCurl;
+    for (const n of ['rightRingProximal', 'rightRingIntermediate', 'rightRingDistal',
+      'rightLittleProximal', 'rightLittleIntermediate', 'rightLittleDistal']) set(b[n], 0, 0, curl);
+    set(b.rightThumbMetacarpal, 0, -0.5 * fingerCurl, 0);
+    set(b.rightThumbProximal, 0, -0.6 * fingerCurl, 0);
+    set(b.rightThumbDistal, 0, -0.5 * fingerCurl, 0);
+    set(b.rightIndexProximal, 0, 0.2 * fingerCurl, 0);
+    set(b.rightMiddleProximal, 0, -0.1 * fingerCurl, 0);
+  }
+
+  // 振り返り(delay 秒)のあとにポーズへ入り、終わる前に戻る重み
+  poseWeight(t, delay) {
+    const dur = EMOTE_DURATION[this.emote] || 1;
+    const turn = 0.4;
+    return smooth(Math.max(0, Math.min(1, (t - delay) / turn, (dur - delay - t) / turn)));
   }
 
   updateFace(dt) {
@@ -222,12 +333,13 @@ export class VrmAnimator {
       if (x >= 1) this.blinkTime = -1;
     }
     // ふだんはほほえみ、エモート中は満面の笑み
-    const happyTarget = this.emote ? 1 : 0.3;
+    const happyTarget = this.emote && !IDLE_EMOTES.includes(this.emote) ? 1 : 0.3;
     const prev = em.getValue('happy') ?? 0;
     const happy = lerp(prev, happyTarget, Math.min(1, dt * 6));
     em.setValue('happy', happy);
     // happy は目を細めるので、まばたきは残りの分だけ
     em.setValue('blink', blink * (1 - happy));
+    em.setValue('blinkLeft', this.emote === 'peace' ? this.poseWeight(this.emoteTime, 0.35) : 0);
     em.setValue('aa', this.emote === 'wave' || this.emote === 'thumbsup' ? 0.3 * this.emoteWeight : 0);
   }
 }

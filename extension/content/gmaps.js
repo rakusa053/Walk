@@ -83,6 +83,7 @@
       else m.show(modelKey, view, onStatus).catch((e) => console.error('[Walk 3D]', e));
     } else if (sv) {
       sv.hide();
+      onStatus('idle');
     }
   }
 

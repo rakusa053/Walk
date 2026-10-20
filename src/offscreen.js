@@ -25,6 +25,23 @@ async function createEstimator() {
   return pipeline('depth-estimation', MODEL, { device: 'wasm', dtype: 'q8' });
 }
 
+// Googleマップの検索欄やミニ地図が入らないよう、画面の中央下側だけを見る
+function isBlank(image) {
+  const { data, width, height, channels } = image;
+  let n = 0, sum = 0, sq = 0;
+  for (let y = Math.floor(height * 0.3); y < height; y += 4) {
+    for (let x = Math.floor(width * 0.2); x < width * 0.8; x += 4) {
+      const k = (y * width + x) * channels;
+      const v = data[k] + data[k + 1] + data[k + 2];
+      sum += v;
+      sq += v * v;
+      n += 1;
+    }
+  }
+  const mean = sum / n;
+  return Math.sqrt(Math.max(0, sq / n - mean * mean)) < 12;
+}
+
 async function estimate(dataUrl) {
   if (!estimatorPromise) {
     estimatorPromise = createEstimator().catch((e) => {
@@ -34,6 +51,8 @@ async function estimate(dataUrl) {
   }
   const estimator = await estimatorPromise;
   let image = await RawImage.fromURL(dataUrl);
+  // パノラマの読み込み中などで画面がほぼ一色のときは推定しない(でたらめな奥行きになる)
+  if (isBlank(image)) return { blank: true };
   if (image.width > 640) image = await image.resize(640, Math.round((640 * image.height) / image.width));
   const { predicted_depth: depth } = await estimator(image);
   const [h, w] = depth.dims.slice(-2);
