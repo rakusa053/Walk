@@ -66,6 +66,10 @@ body.panel-collapsed .panel-body { display: none; }
 .slider span { display: flex; justify-content: space-between; }
 .slider em { font-style: normal; color: var(--muted); font-variant-numeric: tabular-nums; }
 .slider input { width: 100%; accent-color: var(--accent); }
+.select { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.select select { flex: 1; max-width: 160px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font: inherit; }
+.model-row { color: var(--muted); font-weight: 400; font-size: 12px; }
 .check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .check input { accent-color: var(--accent); }
 

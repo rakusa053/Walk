@@ -1,6 +1,8 @@
 import * as maplibregl from 'maplibre-gl';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VrmAnimator } from './vrm-animator.js';
 
 // ---------------------------------------------------------------------------
 // 設定
@@ -25,6 +27,7 @@ const state = {
   target: null,
   distance: 0,
   emote: null, // 再生中のワンショット/ループ動作
+  model: 'girl',
   dirty: true,
 };
 
@@ -53,6 +56,7 @@ function saveState() {
       size: state.size,
       speedMul: state.speedMul,
       follow: state.follow,
+      model: state.model,
       distance: state.distance,
       zoom: map.getZoom(),
       pitch: map.getPitch(),
@@ -95,7 +99,21 @@ const avatar = {
   mixer: null,
   actions: {},
   current: null,
+  vrm: null,
+  animator: null,
 };
+
+// 標準で選べるアバター
+const BUILTIN_MODELS = {
+  girl: { file: 'girl.vrm', label: '女の子' },
+  robot: { file: 'robot.glb', label: 'ロボット' },
+};
+
+function createLoader() {
+  const loader = new GLTFLoader();
+  loader.register((parser) => new VRMLoaderPlugin(parser));
+  return loader;
+}
 
 function findClip(clips, patterns) {
   for (const p of patterns) {
@@ -108,6 +126,20 @@ function findClip(clips, patterns) {
 function setModel(gltf) {
   if (avatar.model) avatar.root.remove(avatar.model);
   if (avatar.mixer) avatar.mixer.stopAllAction();
+  if (avatar.vrm) VRMUtils.deepDispose(avatar.vrm.scene);
+  avatar.mixer = null;
+  avatar.vrm = null;
+  avatar.animator = null;
+  avatar.actions = {};
+  avatar.current = null;
+  state.emote = null;
+
+  const vrm = gltf.userData.vrm;
+  if (vrm) {
+    // VRM 0.x は -Z 向きなので +Z 向きにそろえる
+    VRMUtils.rotateVRM0(vrm);
+    vrm.scene.updateMatrixWorld(true);
+  }
 
   const model = gltf.scene;
   model.traverse((o) => {
@@ -126,6 +158,18 @@ function setModel(gltf) {
 
   avatar.model = wrapper;
   avatar.root.add(wrapper);
+
+  if (vrm) {
+    avatar.vrm = vrm;
+    avatar.animator = new VrmAnimator(vrm);
+    avatar.animator.onEmoteEnd = () => {
+      state.emote = null;
+    };
+    // 揺れもの(髪・スカート)を初期姿勢に落ち着かせる
+    vrm.springBoneManager?.reset();
+    state.dirty = true;
+    return;
+  }
 
   const mixer = new THREE.AnimationMixer(model);
   const clips = gltf.animations || [];
@@ -175,6 +219,12 @@ function playAction(name, fade = 0.25) {
 }
 
 function triggerEmote(name) {
+  if (avatar.animator) {
+    clearTarget();
+    state.emote = name;
+    avatar.animator.startEmote(name);
+    return;
+  }
   const action = avatar.actions[name];
   if (!action) return;
   clearTarget();
@@ -371,7 +421,7 @@ function tick(t) {
 
   const moving = forward !== 0;
   if (moving) {
-    state.emote = null;
+    if (!avatar.animator) state.emote = null;
     const base = running ? RUN_SPEED : WALK_SPEED;
     let step = forward * base * state.size * state.speedMul * dt;
     if (forward < 0) step *= 0.6;
@@ -382,7 +432,12 @@ function tick(t) {
   }
 
   // アニメーション
-  if (avatar.mixer) {
+  if (avatar.animator) {
+    const speed = moving ? (running ? RUN_SPEED : WALK_SPEED) * state.speedMul * (forward < 0 ? 0.6 : 1) : 0;
+    if (moving) state.emote = state.emote === 'jump' ? 'jump' : null;
+    avatar.animator.update(dt, { forward, running, speed });
+    avatar.model.position.y = avatar.animator.lift;
+  } else if (avatar.mixer) {
     let name;
     if (moving) name = running ? 'run' : 'walk';
     else name = state.emote || 'idle';
@@ -492,16 +547,30 @@ function setupUi() {
     if (!file) return;
     const url = URL.createObjectURL(file);
     try {
-      const gltf = await new GLTFLoader().loadAsync(url);
+      const gltf = await createLoader().loadAsync(url);
       setModel(gltf);
       $('model-name').textContent = file.name;
+      $('model-select').value = '';
     } catch (err) {
       alert(`モデルを読み込めませんでした: ${err.message}`);
     } finally {
       URL.revokeObjectURL(url);
     }
   });
-  $('model-reset').addEventListener('click', loadDefaultModel);
+  const select = $('model-select');
+  for (const [key, m] of Object.entries(BUILTIN_MODELS)) {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = m.label;
+    select.appendChild(opt);
+  }
+  select.value = state.model;
+  select.addEventListener('change', () => {
+    if (!select.value) return;
+    state.model = select.value;
+    loadBuiltinModel(state.model);
+    saveState();
+  });
 
   $('btn-gmaps').addEventListener('click', () => {
     window.open(`https://www.google.com/maps/@${state.pos.lat},${state.pos.lng},19z`, '_blank');
@@ -583,11 +652,13 @@ function setupUi() {
   setInterval(saveState, 3000);
 }
 
-async function loadDefaultModel() {
-  const url = new URL('../models/robot.glb', import.meta.url).href;
-  const gltf = await new GLTFLoader().loadAsync(url);
+async function loadBuiltinModel(key) {
+  const m = BUILTIN_MODELS[key] || BUILTIN_MODELS.girl;
+  $('model-name').textContent = '読み込み中…';
+  const url = new URL(`../models/${m.file}`, import.meta.url).href;
+  const gltf = await createLoader().loadAsync(url);
   setModel(gltf);
-  $('model-name').textContent = 'ロボット(標準)';
+  $('model-name').textContent = m.label;
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +675,7 @@ async function main() {
     state.size = saved.size ?? state.size;
     state.speedMul = saved.speedMul ?? state.speedMul;
     state.follow = saved.follow ?? state.follow;
+    if (BUILTIN_MODELS[saved.model]) state.model = saved.model;
     state.distance = saved.distance ?? 0;
     view = { zoom: saved.zoom ?? 19.5, pitch: saved.pitch ?? 70, bearing: saved.bearing ?? state.heading };
   }
@@ -655,7 +727,7 @@ async function main() {
     requestAnimationFrame(tick);
   });
 
-  loadDefaultModel().catch((err) => console.error('model load failed', err));
+  loadBuiltinModel(state.model).catch((err) => console.error('model load failed', err));
 }
 
 main();

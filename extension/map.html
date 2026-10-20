@@ -32,12 +32,15 @@
     <button id="btn-panel" class="panel-toggle" type="button" title="パネルの開閉">☰</button>
     <div class="panel-body">
       <h2>アバター</h2>
+      <label class="row select">
+        <span>キャラクター</span>
+        <select id="model-select"><option value="" hidden>自分のモデル</option></select>
+      </label>
       <div class="row model-row">
         <span id="model-name">読み込み中…</span>
       </div>
       <div class="row buttons">
-        <label class="btn">3Dモデルを読み込む (.glb)<input id="model-file" type="file" accept=".glb,.gltf" hidden></label>
-        <button id="model-reset" class="btn ghost" type="button">標準に戻す</button>
+        <label class="btn">自分のモデルを読み込む (.vrm / .glb)<input id="model-file" type="file" accept=".vrm,.glb,.gltf" hidden></label>
       </div>
       <label class="row slider">
         <span>大きさ <em id="size-val"></em></span>
@@ -73,7 +76,7 @@
       <dt>ドラッグ</dt><dd>カメラを回す・傾ける</dd>
       <dt>ホイール</dt><dd>ズーム</dd>
       <dt>Space</dt><dd>ジャンプ</dd>
-      <dt>1 / 2 / 3</dt><dd>手を振る / いいね / ダンス</dd>
+      <dt>1 / 2 / 3</dt><dd>手を振る / よろこぶ / ダンス</dd>
       <dt>F または /</dt><dd>場所を検索</dd>
       <dt>Esc</dt><dd>自動歩行をやめる</dd>
     </dl>
