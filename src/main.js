@@ -1,7 +1,6 @@
 import * as maplibregl from 'maplibre-gl';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { BUILTIN_MODELS, builtinModelUrl, createLoader, disposeVrm, findClip, normalizeModel } from './avatar-model.js';
 import { VrmAnimator } from './vrm-animator.js';
 
 // ---------------------------------------------------------------------------
@@ -103,30 +102,10 @@ const avatar = {
   animator: null,
 };
 
-// 標準で選べるアバター
-const BUILTIN_MODELS = {
-  girl: { file: 'girl.vrm', label: '女の子' },
-  robot: { file: 'robot.glb', label: 'ロボット' },
-};
-
-function createLoader() {
-  const loader = new GLTFLoader();
-  loader.register((parser) => new VRMLoaderPlugin(parser));
-  return loader;
-}
-
-function findClip(clips, patterns) {
-  for (const p of patterns) {
-    const c = clips.find((clip) => p.test(clip.name));
-    if (c) return c;
-  }
-  return null;
-}
-
 function setModel(gltf) {
   if (avatar.model) avatar.root.remove(avatar.model);
   if (avatar.mixer) avatar.mixer.stopAllAction();
-  if (avatar.vrm) VRMUtils.deepDispose(avatar.vrm.scene);
+  disposeVrm(avatar.vrm);
   avatar.mixer = null;
   avatar.vrm = null;
   avatar.animator = null;
@@ -134,27 +113,8 @@ function setModel(gltf) {
   avatar.current = null;
   state.emote = null;
 
-  const vrm = gltf.userData.vrm;
-  if (vrm) {
-    // VRM 0.x は -Z 向きなので +Z 向きにそろえる
-    VRMUtils.rotateVRM0(vrm);
-    vrm.scene.updateMatrixWorld(true);
-  }
-
-  const model = gltf.scene;
-  model.traverse((o) => {
-    if (o.isMesh) o.frustumCulled = false;
-  });
-
   // 高さを AVATAR_HEIGHT_M に正規化し、足元を原点に合わせる
-  const box = new THREE.Box3().setFromObject(model);
-  const size = box.getSize(new THREE.Vector3());
-  const s = AVATAR_HEIGHT_M / (size.y || 1);
-  const wrapper = new THREE.Group();
-  model.scale.setScalar(s);
-  const center = box.getCenter(new THREE.Vector3());
-  model.position.set(-center.x * s, -box.min.y * s, -center.z * s);
-  wrapper.add(model);
+  const { wrapper, model, vrm } = normalizeModel(gltf, AVATAR_HEIGHT_M);
 
   avatar.model = wrapper;
   avatar.root.add(wrapper);
@@ -655,7 +615,7 @@ function setupUi() {
 async function loadBuiltinModel(key) {
   const m = BUILTIN_MODELS[key] || BUILTIN_MODELS.girl;
   $('model-name').textContent = '読み込み中…';
-  const url = new URL(`../models/${m.file}`, import.meta.url).href;
+  const url = builtinModelUrl(key);
   const gltf = await createLoader().loadAsync(url);
   setModel(gltf);
   $('model-name').textContent = m.label;

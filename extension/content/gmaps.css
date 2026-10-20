@@ -1,8 +1,19 @@
-#walk3d-button {
+#walk3d-buttons {
   position: fixed;
-  right: 72px;
-  bottom: 24px;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
   z-index: 2147483000;
+  display: flex;
+  gap: 8px;
+}
+/* ストリートビュー中はアバターと重ならないよう上に出す */
+#walk3d-buttons.streetview {
+  top: 20px;
+  bottom: auto;
+}
+#walk3d-buttons:not(.streetview) .walk3d-toggle { display: none; }
+#walk3d-buttons button {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -15,5 +26,19 @@
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   cursor: pointer;
 }
-#walk3d-button:hover { background: #1765cc; }
-#walk3d-button .walk3d-icon { font-size: 16px; }
+#walk3d-buttons button:hover { filter: brightness(1.08); }
+#walk3d-buttons button.walk3d-toggle { background: #e8467c; }
+#walk3d-buttons button.walk3d-toggle.off { background: #5f6368; }
+#walk3d-buttons .walk3d-icon { font-size: 16px; }
+
+#walk3d-sv-avatar {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: min(560px, 50vw);
+  height: 62vh;
+  z-index: 2147482000;
+  pointer-events: none;
+}
+#walk3d-sv-avatar[hidden] { display: none; }

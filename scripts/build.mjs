@@ -1,16 +1,20 @@
 import { build } from 'esbuild';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
 
 const out = 'extension/build';
+rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
+// app.js: 3Dマップのページ / streetview.js: Googleマップに重ねるアバター
 await build({
-  entryPoints: ['src/main.js'],
+  entryPoints: { app: 'src/main.js', streetview: 'src/streetview.js' },
   bundle: true,
+  splitting: true,
   format: 'esm',
   minify: true,
   target: 'chrome110',
-  outfile: `${out}/app.js`,
+  outdir: out,
+  chunkNames: 'chunk-[hash]',
   legalComments: 'eof',
 });
 
