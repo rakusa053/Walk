@@ -2,7 +2,7 @@ import * as maplibregl from 'maplibre-gl';
 import * as THREE from 'three';
 import { BUILTIN_MODELS, builtinModelUrl, createLoader, disposeVrm, findClip, normalizeModel } from './avatar-model.js';
 import { VrmAnimator } from './vrm-animator.js';
-import { Companion, areaName, formatDistance, greetingKey, passedMilestone } from './companion.js';
+import { AreaWatcher, Companion, formatDistance, greetingKey, passedMilestone } from './companion.js';
 
 // ---------------------------------------------------------------------------
 // 設定
@@ -43,12 +43,8 @@ const talk = {
   beckoned: false,
   sessionM: 0, // このページを開いてから一緒に歩いた距離
   greeted: false,
-  geoBusy: false,
-  geoAt: null,
-  geoTime: -1e9,
-  area: null,
-  city: null,
 };
+const areaWatcher = new AreaWatcher();
 const nowS = () => performance.now() / 1000;
 
 // ---------------------------------------------------------------------------
@@ -320,8 +316,8 @@ function updateCompanion(dt, moving) {
     talk.nextLookBack = 8 + Math.random() * 8;
   }
 
-  // はじめにあいさつ(時間帯で変える)と、いる場所の地名
-  if (!talk.greeted && avatar.model) {
+  // はじめにあいさつ(時間帯で変える)と、いる場所の地名(おしゃべりが OFF のあいだはしない)
+  if (!talk.greeted && avatar.model && companion.enabled) {
     talk.greeted = true;
     companion.say(greetingKey(), {}, { priority: 3, cooldown: 0 });
     maybeLookupArea();
@@ -345,32 +341,10 @@ function updateCompanion(dt, moving) {
   }
 }
 
-// 地名を調べて、変わったら「〇〇に来たね」(200m 動くごと、15 秒以上あけて)
+// 地名が変わったら「〇〇に来たね」(調べる間隔は AreaWatcher が守る)
 function maybeLookupArea() {
-  if (!companion.enabled || talk.geoBusy || nowS() - talk.geoTime < 15 || !hasChromeStorage) return;
-  if (talk.geoAt && vectorTo(talk.geoAt, state.pos).dist < 200) return;
-  const { lat, lng } = state.pos;
-  talk.geoBusy = true;
-  talk.geoAt = { lat, lng };
-  talk.geoTime = nowS();
-  chrome.runtime
-    .sendMessage({ type: 'reverse-geocode', lat, lng, lang: navigator.language })
-    .then((res) => {
-      const area = areaName(res?.address);
-      if (!area?.name) return;
-      const opts = { priority: 2, cooldown: 0, queue: true };
-      if (talk.area === null) companion.say('areaStart', { name: area.name }, opts);
-      else if (area.name !== talk.area) {
-        if (area.city && talk.city && area.city !== talk.city) companion.say('areaCity', { name: area.name, city: area.city }, opts);
-        else companion.say('area', { name: area.name }, opts);
-      }
-      talk.area = area.name;
-      talk.city = area.city;
-    })
-    .catch((e) => console.warn('[Walk 3D] 地名を調べられませんでした', e))
-    .finally(() => {
-      talk.geoBusy = false;
-    });
+  if (!companion.enabled || !hasChromeStorage) return;
+  areaWatcher.check(state.pos.lat, state.pos.lng, (key, vars) => companion.say(key, vars, { priority: 2, cooldown: 0, queue: true }));
 }
 
 // ---------------------------------------------------------------------------
@@ -628,8 +602,7 @@ function setupUi() {
           teleport(parseFloat(item.lon), parseFloat(item.lat));
           companion.say('warp', { name: item.name || item.display_name.split(',')[0] }, { priority: 2, cooldown: 0 });
           // ワープした先の地名をすぐ調べ直す
-          talk.geoAt = null;
-          talk.geoTime = -1e9;
+          areaWatcher.reset();
           maybeLookupArea();
           results.hidden = true;
           $('search-input').blur();

@@ -21,6 +21,7 @@ env.backends.onnx.wasm.wasmPaths = {
 
 let estimatorPromise = null;
 let detectorPromise = null;
+let lastDepth = null; // 椅子を探し直すときは同じ画像が来るので、奥行きは計算し直さない
 
 async function createEstimator() {
   if (navigator.gpu) {
@@ -87,6 +88,11 @@ async function estimate(dataUrl) {
   // パノラマの読み込み中などで画面がほぼ一色のときは推定しない(でたらめな奥行きになる)
   if (isBlank(image)) return { blank: true };
   if (image.width > 640) image = await image.resize(640, Math.round((640 * image.height) / image.width));
+  if (lastDepth?.dataUrl !== dataUrl) lastDepth = { dataUrl, out: await estimateDepth(estimator, image) };
+  return { ...lastDepth.out, ...(await detectObjects(image)) };
+}
+
+async function estimateDepth(estimator, image) {
   const { predicted_depth: depth } = await estimator(image);
   const [h, w] = depth.dims.slice(-2);
   const src = depth.data;
@@ -101,7 +107,7 @@ async function estimate(dataUrl) {
       out[y * ow + x] = Math.round(src[sy * w + sx] * 1000) / 1000;
     }
   }
-  return { width: ow, height: oh, data: out, ...(await detectObjects(image)) };
+  return { width: ow, height: oh, data: out };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

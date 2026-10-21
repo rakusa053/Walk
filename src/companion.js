@@ -41,6 +41,7 @@ const LINES = {
 export const THING_LABELS = ['dog', 'cat', 'bird', 'horse', 'bus', 'train', 'boat', 'bicycle'];
 
 const MIN_GAP_S = 7; // ふつうのおしゃべりどうしの最低の間隔
+const MAX_PENDING = 4; // あとで言う予定のセリフをいくつまで覚えておくか
 
 const STYLE = `
 .walk3d-bubble {
@@ -73,13 +74,13 @@ export class Companion {
     this.el.className = 'walk3d-bubble';
     document.documentElement.appendChild(this.el);
     this.enabled = true;
-    this.hidden = false; // 画面キャプチャの間だけ隠す
     this.until = 0; // いまの吹き出しを消す時刻
     this.priority = 0;
     this.lastAny = -Infinity;
     this.lastSaid = {};
     this.lastText = {};
-    this.pending = null; // 前の吹き出しが終わってから言うこと
+    this.pending = []; // 前の吹き出しが終わってから言うこと(優先度の高いものから)
+    this.halfWidth = 0; // 吹き出しの幅の半分(画面の端からはみ出さないように)
   }
 
   // いま吹き出しが出ているか(話している間はアバターがこちらを向いたり口を動かしたりする)
@@ -91,26 +92,28 @@ export class Companion {
     this.enabled = on;
     if (!on) {
       this.until = 0;
-      this.pending = null;
+      this.pending = [];
       this.el.classList.remove('show');
     }
   }
 
   // key の中からひとつ選んで言う。priority が高いと、いま出ている低いものを上書きする。
   // queue なら、いま別のことを言っている間は、終わってから言う
-  say(key, vars = {}, { priority = 1, cooldown = 30, queue = false } = {}) {
+  say(key, vars = {}, { priority = 1, cooldown = 30, queue = false } = {}, ignoreGap = false) {
     if (!this.enabled || !LINES[key]) return false;
     const t = now();
     if (t - (this.lastSaid[key] ?? -Infinity) < cooldown) return false;
     const showing = t < this.until;
-    if ((showing && priority <= this.priority) || (!showing && priority < 2 && t - this.lastAny < MIN_GAP_S)) {
-      if (queue) this.pending = { key, vars, priority, cooldown, expires: t + 10 };
+    const tooSoon = !ignoreGap && priority < 2 && t - this.lastAny < MIN_GAP_S;
+    if ((showing && priority <= this.priority) || (!showing && tooSoon)) {
+      if (queue) this.enqueue({ key, vars, priority, cooldown, expires: t + 15 });
       return false;
     }
     const choices = LINES[key].filter((s) => s !== this.lastText[key]);
     const pick = choices[Math.floor(Math.random() * choices.length)] || LINES[key][0];
     const text = pick.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '');
     this.el.textContent = text;
+    this.halfWidth = this.el.offsetWidth / 2 + 8;
     this.until = t + 2.5 + text.length * 0.12;
     this.priority = priority;
     this.lastSaid[key] = t;
@@ -119,21 +122,29 @@ export class Companion {
     return true;
   }
 
+  // 同じキーは新しいほうだけ。優先度の高いものから並べ、多すぎたら低いものを捨てる
+  enqueue(item) {
+    this.pending = this.pending.filter((p) => p.key !== item.key).concat(item);
+    this.pending.sort((p, q) => q.priority - p.priority || p.expires - q.expires);
+    this.pending.length = Math.min(this.pending.length, MAX_PENDING);
+  }
+
   // anchor: 頭の上の画面上の位置 {x, y}(px)。null なら吹き出しを出さない
   update(anchor) {
     const t = now();
-    if (t >= this.until && this.pending) {
-      const p = this.pending;
-      this.pending = null;
-      if (t < p.expires && t - this.lastAny > 0.8) {
-        this.lastAny = -Infinity; // 待っていたので、間隔の決まりは気にしない
-        this.say(p.key, p.vars, { priority: p.priority, cooldown: p.cooldown });
+    if (this.pending.length && t >= this.until + 0.6) { // 前の吹き出しが消えてから少し間をあける
+      this.pending = this.pending.filter((p) => t < p.expires);
+      // 待っていたものは、ふつうの間隔の決まりは気にせずに言う
+      while (this.pending.length) {
+        const p = this.pending.shift();
+        if (this.say(p.key, p.vars, { priority: p.priority, cooldown: p.cooldown }, true)) break;
       }
     }
-    const visible = this.enabled && !this.hidden && anchor && t < this.until;
+    const visible = this.enabled && anchor && t < this.until;
     this.el.classList.toggle('show', !!visible);
     if (visible) {
-      const x = Math.round(Math.max(80, Math.min(window.innerWidth - 80, anchor.x)));
+      const margin = Math.max(80, this.halfWidth);
+      const x = Math.round(Math.max(margin, Math.min(window.innerWidth - margin, anchor.x)));
       const y = Math.round(Math.max(40, anchor.y));
       this.el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%)`;
     }
@@ -164,6 +175,58 @@ export function passedMilestone(from, to) {
 
 export function formatDistance(m) {
   return m >= 1000 ? `${Math.round((m / 1000) * 10) / 10}km` : `${Math.round(m)}m`;
+}
+
+// いる場所の地名を調べて、変わったら「〇〇に来たね」と言う。
+// 地名は background.js が Nominatim で調べる。Nominatim は 1 秒に 1 回までなので、
+// 前に調べた場所から 200m 以上動いて、15 秒以上たったときだけ調べる
+const GEO_STEP_M = 200;
+const GEO_INTERVAL_S = 15;
+
+export class AreaWatcher {
+  constructor() {
+    this.busy = false;
+    this.at = null; // 最後に調べた場所 {lat, lng}
+    this.time = -Infinity;
+    this.last = null; // いまの地名 {name, city}
+  }
+
+  // say(key, vars) で一言(言わないときは呼ばない)
+  check(lat, lng, say) {
+    if (this.busy || !Number.isFinite(lat) || !Number.isFinite(lng) || now() - this.time < GEO_INTERVAL_S) return;
+    if (this.at) {
+      const dn = (lat - this.at.lat) * 111320;
+      const de = (lng - this.at.lng) * 111320 * Math.cos((lat * Math.PI) / 180);
+      if (Math.hypot(dn, de) < GEO_STEP_M) return;
+    }
+    this.busy = true;
+    this.at = { lat, lng };
+    this.time = now();
+    chrome.runtime
+      .sendMessage({ type: 'reverse-geocode', lat, lng, lang: navigator.language })
+      .then((res) => {
+        if (res?.error) console.warn('[Walk 3D] 地名を調べられませんでした', res.error);
+        const area = areaName(res?.address);
+        if (!area?.name) return;
+        const prev = this.last;
+        this.last = area;
+        if (!prev) say('areaStart', { name: area.name });
+        else if (area.name !== prev.name) {
+          if (area.city && prev.city && area.city !== prev.city) say('areaCity', { name: area.name, city: area.city });
+          else say('area', { name: area.name });
+        }
+      })
+      .catch((e) => console.warn('[Walk 3D] 地名を調べられませんでした', e))
+      .finally(() => {
+        this.busy = false;
+      });
+  }
+
+  // ワープしたときなど、次はすぐ調べる
+  reset() {
+    this.at = null;
+    this.time = -Infinity;
+  }
 }
 
 // 逆ジオコーディング(Nominatim)の住所から、話題にする地名を選ぶ(〇〇丁目は外す)

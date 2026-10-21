@@ -101,10 +101,6 @@ export class VrmAnimator {
     if (now) this.sitWeight = on ? 1 : 0;
   }
 
-  get seated() {
-    return this.sitting && this.sitWeight >= 1;
-  }
-
   stopEmote() {
     this.emote = null;
   }
