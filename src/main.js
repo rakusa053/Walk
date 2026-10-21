@@ -344,7 +344,11 @@ function updateCompanion(dt, moving) {
 // 地名が変わったら「〇〇に来たね」(調べる間隔は AreaWatcher が守る)
 function maybeLookupArea() {
   if (!companion.enabled || !hasChromeStorage) return;
-  areaWatcher.check(state.pos.lat, state.pos.lng, (key, vars) => companion.say(key, vars, { priority: 2, cooldown: 0, queue: true }));
+  areaWatcher.check(state.pos.lat, state.pos.lng, (key, vars) => {
+    if (!companion.enabled) return false;
+    companion.say(key, vars, { priority: 2, cooldown: 0, queue: true });
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -618,7 +618,11 @@ function bubbleAnchor(c) {
 // 地名が変わったら「〇〇に来たね」(調べる間隔は AreaWatcher が守る)
 function checkArea(view) {
   if (!talkEnabled) return;
-  areaWatcher.check(view?.lat, view?.lng, (key, vars) => ctx?.companion.say(key, vars, { priority: 2, cooldown: 0, queue: true }));
+  areaWatcher.check(view?.lat, view?.lng, (key, vars) => {
+    if (!ctx?.companion.enabled) return false;
+    ctx.companion.say(key, vars, { priority: 2, cooldown: 0, queue: true });
+    return true;
+  });
 }
 
 // 写真に写っている犬・猫などを話題にして、そちらを見る(別のことを話している間なら、そのあとで言う)

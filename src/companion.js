@@ -49,7 +49,7 @@ const STYLE = `
   max-width: 260px; padding: 7px 13px; border-radius: 16px;
   background: #fff; color: #333; box-shadow: 0 2px 10px rgba(0, 0, 0, .28);
   font: 600 14px/1.45 "Hiragino Maru Gothic ProN", "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
-  white-space: nowrap; opacity: 0; transition: opacity .25s;
+  overflow-wrap: anywhere; opacity: 0; transition: opacity .25s;
 }
 .walk3d-bubble.show { opacity: 1; }
 .walk3d-bubble::after {
@@ -80,7 +80,9 @@ export class Companion {
     this.lastSaid = {};
     this.lastText = {};
     this.pending = []; // 前の吹き出しが終わってから言うこと(優先度の高いものから)
-    this.halfWidth = 0; // 吹き出しの幅の半分(画面の端からはみ出さないように)
+    // 吹き出しの幅の半分と高さ(画面の端からはみ出さないように。長いセリフは 2 行になる)
+    this.halfWidth = 0;
+    this.height = 0;
   }
 
   // いま吹き出しが出ているか(話している間はアバターがこちらを向いたり口を動かしたりする)
@@ -98,7 +100,8 @@ export class Companion {
   }
 
   // key の中からひとつ選んで言う。priority が高いと、いま出ている低いものを上書きする。
-  // queue なら、いま別のことを言っている間は、終わってから言う
+  // queue なら、いま言えないとき(別のことを言っている・前のおしゃべりから間がない)は、前の吹き出しが
+  // 消えてから言う(犬がいた・走った など、そのときのことなので、7 秒の間隔は待たない)
   say(key, vars = {}, { priority = 1, cooldown = 30, queue = false } = {}, ignoreGap = false) {
     if (!this.enabled || !LINES[key]) return false;
     const t = now();
@@ -114,6 +117,7 @@ export class Companion {
     const text = pick.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '');
     this.el.textContent = text;
     this.halfWidth = this.el.offsetWidth / 2 + 8;
+    this.height = this.el.offsetHeight + 8;
     this.until = t + 2.5 + text.length * 0.12;
     this.priority = priority;
     this.lastSaid[key] = t;
@@ -145,7 +149,7 @@ export class Companion {
     if (visible) {
       const margin = Math.max(80, this.halfWidth);
       const x = Math.round(Math.max(margin, Math.min(window.innerWidth - margin, anchor.x)));
-      const y = Math.round(Math.max(40, anchor.y));
+      const y = Math.round(Math.max(this.height, anchor.y));
       this.el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%)`;
     }
   }
@@ -191,7 +195,8 @@ export class AreaWatcher {
     this.last = null; // いまの地名 {name, city}
   }
 
-  // say(key, vars) で一言(言わないときは呼ばない)
+  // say(key, vars) で一言(言わないときは呼ばない)。返事が来る前にストリートビューを出たり
+  // おしゃべりを OFF にしたりして言えなかったら、say は false を返す(地名を覚えずに、次にまた調べる)
   check(lat, lng, say) {
     if (this.busy || !Number.isFinite(lat) || !Number.isFinite(lng) || now() - this.time < GEO_INTERVAL_S) return;
     if (this.at) {
@@ -209,12 +214,14 @@ export class AreaWatcher {
         const area = areaName(res?.address);
         if (!area?.name) return;
         const prev = this.last;
-        this.last = area;
-        if (!prev) say('areaStart', { name: area.name });
+        let said = true;
+        if (!prev) said = say('areaStart', { name: area.name });
         else if (area.name !== prev.name) {
-          if (area.city && prev.city && area.city !== prev.city) say('areaCity', { name: area.name, city: area.city });
-          else say('area', { name: area.name });
+          if (area.city && prev.city && area.city !== prev.city) said = say('areaCity', { name: area.name, city: area.city });
+          else said = say('area', { name: area.name });
         }
+        if (said === false) this.at = null;
+        else this.last = area;
       })
       .catch((e) => console.warn('[Walk 3D] 地名を調べられませんでした', e))
       .finally(() => {
