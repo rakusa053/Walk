@@ -23,12 +23,24 @@ let estimatorPromise = null;
 let detectorPromise = null;
 let lastDepth = null; // 椅子を探し直すときは同じ画像が来るので、奥行きは計算し直さない
 
+// 奥行きの推定と椅子などの検出は、transformers.js が中で1列に並べて順番に動かしている(こちらで同時に
+// 呼んでも速くならない。1.6.2 で確認)。片方が失敗してももう片方は動くように、ビルドで transformers.js を
+// 直している(scripts/build.mjs)
+
+// WebGPU で読み込めなかったり推定に失敗したり(GPU のリセットなど)したら、あとは WASM で推定する
+let useWebGPU = !!navigator.gpu;
+// WASM でも推定できなかったら、ORT ごと壊れているかもしれないので、background に
+// このドキュメントを作り直してもらう。ダウンロードの失敗(429 など)は作り直しても変わらないので除く
+let needsRestart = false;
+const isDownloadError = (e) => /trying to load file|Could not locate file|Failed to fetch|NetworkError/i.test(String(e?.message || e));
+
 async function createEstimator() {
-  if (navigator.gpu) {
+  if (useWebGPU) {
     try {
       return await pipeline('depth-estimation', MODEL, { device: 'webgpu', dtype: 'fp16' });
     } catch (e) {
       console.warn('[Walk 3D] WebGPU が使えないので WASM で推定します', e);
+      if (!isDownloadError(e)) useWebGPU = false;
     }
   }
   return pipeline('depth-estimation', MODEL, { device: 'wasm', dtype: 'q8' });
@@ -80,15 +92,31 @@ async function estimate(dataUrl) {
   if (!estimatorPromise) {
     estimatorPromise = createEstimator().catch((e) => {
       estimatorPromise = null;
+      if (!isDownloadError(e)) needsRestart = true;
       throw e;
     });
   }
-  const estimator = await estimatorPromise;
+  const current = estimatorPromise;
+  const estimator = await current;
   let image = await RawImage.fromURL(dataUrl);
   // パノラマの読み込み中などで画面がほぼ一色のときは推定しない(でたらめな奥行きになる)
   if (isBlank(image)) return { blank: true };
   if (image.width > 640) image = await image.resize(640, Math.round((640 * image.height) / image.width));
-  if (lastDepth?.dataUrl !== dataUrl) lastDepth = { dataUrl, out: await estimateDepth(estimator, image) };
+  if (lastDepth?.dataUrl !== dataUrl) {
+    try {
+      lastDepth = { dataUrl, out: await estimateDepth(estimator, image) };
+      needsRestart = false; // 推定できるようになったら作り直さない
+    } catch (e) {
+      // 失敗した推定器は捨てて、次は作り直す(WebGPU で失敗したら WASM で)
+      if (estimatorPromise === current) {
+        estimatorPromise = null;
+        if (useWebGPU) useWebGPU = false;
+        else needsRestart = true;
+        estimator.dispose().catch(() => {});
+      }
+      throw e;
+    }
+  }
   return { ...lastDepth.out, ...(await detectObjects(image)) };
 }
 
@@ -113,7 +141,7 @@ async function estimateDepth(estimator, image) {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== 'offscreen' || msg.type !== 'depth') return false;
   estimate(msg.dataUrl)
-    .then((depth) => sendResponse({ depth }))
-    .catch((e) => sendResponse({ error: String(e?.message || e) }));
+    .then((depth) => sendResponse({ depth, restart: needsRestart }))
+    .catch((e) => sendResponse({ error: String(e?.message || e), restart: needsRestart }));
   return true;
 });

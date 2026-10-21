@@ -51,6 +51,10 @@
 - **地面の高さ**: 画面中央の帯で、前方距離がアバターの距離±0.45m の点の高さの下位20%を地面とし、-1.2〜1.5m にクランプしてなめらかに移動。足元の地面が画面の外のとき(上を向いている等)は集めない(手前の車のボンネットを地面と取り違えていた)
 - **真っ黒な画面**: パノラマ読み込み中などで画面中央下がほぼ一色なら、オフスクリーン側で `{ blank: true }` を返し、失敗に数えずに 0.5→1→2…8 秒あけて再挑戦する(以前は黒い画面でも「OK」になり、でたらめな奥行きで隠れていた)
 - 視点が変わったら古い奥行きは無効(隠れ処理オフ、地面は移動時に 0 へ)。3回失敗したら推定をやめる
+- **AI が失敗したとき**(1.6.2): transformers.js は、読み込み(セッション作成)と推定を、それぞれ1列に並べて順番に動かす(`webInitChain` / `webInferenceChain`)。4.3.1 では列の中で一度失敗すると、あとに並んだものも全部同じエラーで失敗し続けるので、ビルドで直している(下の「ビルド」)。そのうえで `offscreen.js` は:
+  - 奥行きの推定に失敗したら推定器を捨て、次の推定で作り直す。WebGPU で失敗したら(読み込み・推定とも、ダウンロードの失敗を除く)そのドキュメントでは以後 WASM
+  - WASM でも失敗したら(ORT ごと壊れたときなど。ダウンロードの失敗は除く)`restart: true` を返し、background がオフスクリーンドキュメントを閉じて、次の推定で作り直す。続けて失敗するときは 30 秒・1 分・2 分…最長 10 分あける(推定できたら 30 秒に戻る。service worker が止まると数え直し)
+  - 椅子などの検出に失敗しても `seats: null` を返すだけ(作り直さない)
 - モデルは初回に Hugging Face(`onnx-community/depth-anything-v2-small`)からダウンロードされ、ブラウザにキャッシュされる
 - 権限: `captureVisibleTab` のために `host_permissions: ["<all_urls>"]`、`offscreen`。CSP に `'wasm-unsafe-eval'`。`env.useWasmCache = false`(blob: URL の import は拡張の CSP で禁止)、WASM は `build/ort/` に同梱(asyncify 版、約27MB)
 
@@ -63,6 +67,7 @@ npm run build                  # scripts/build.mjs → extension/build/
 
 - `app.js`(地図ページ)と `streetview.js` はコード分割(共通チャンク `chunk-*.js`)、`offscreen.js` は別ビルド
 - **ビルド成果物 `extension/build/` もコミットする**(ユーザーはビルドせずに ZIP から読み込むため)
+- **transformers.js の書き換え**(1.6.2): `scripts/build.mjs` のプラグインで、`dist/transformers.web.js` の `webInitChain = webInitChain.then(` と `webInferenceChain = webInferenceChain.then(` を `….catch(() => {}).then(` に書き換えている(前のものが失敗しても次を動かす。順番に動かすのは同じ)。2 か所見つからなければビルドがエラーで止まる。transformers.js を更新したら、直っていないか見て、直っていたら外す
 - **注意(GitHub のシークレット検出)**: transformers.js を1行に minify すると、`"mistral"` の近くに 32文字の英数字(`Mistral3ForConditionalGeneration` や gist ID)が並び、「Mistral AI API Key」と誤検出されて push が拒否された。対策として offscreen.js は改行を残し(`minifyWhitespace` なし)、さらに 32文字の英数字の並びは先頭1文字を `\uXXXX` に置換している(`scripts/build.mjs`)。依存を更新したら再発に注意
 
 ## テストのやり方(前のセッションで使ったもの)
@@ -143,7 +148,7 @@ npm run build                  # scripts/build.mjs → extension/build/
 
 ユーザーの依頼「バグがないかチェックして」。`code-review` スキルで 1.4.1 以降(679d781..HEAD)を見て、見つかったものを本物の画面・単体のテストで確かめて直した(内容は CHANGELOG の 1.6.1)。
 
-- 直さなかったもの: 奥行き推定と物体検出を `Promise.all` で同時に動かす案。onnxruntime-web の asyncify 版(WebGPU 用)は、ひとつの WASM で2つのセッションを同時に動かすと、途中で処理を譲るときに入れ子になって壊れるおそれがあるので、順番のままにした
+- 直さなかったもの: 奥行き推定と物体検出を `Promise.all` で同時に動かす案。onnxruntime-web の asyncify 版(WebGPU 用)は、ひとつの WASM で2つのセッションを同時に動かすと、途中で処理を譲るときに入れ子になって壊れるおそれがあるので、順番のままにした(→ 7回目で検証した。そもそも transformers.js が中で順番に並べるので速くならない)
 - 確かめ方:
   - 手招き: 中身の無いページ(`ctx.route`)で 30 秒待ってから `history.pushState` でストリートビューに入り、あいさつと地名だけ出ることを確認
   - 地名の問い合わせ回数: `sw.evaluate` で background の `reverseGeocode` を数える関数に差し替え、アバターの ON/OFF を 3 回くり返しても 1 回だけ
@@ -152,12 +157,35 @@ npm run build                  # scripts/build.mjs → extension/build/
   - ロボット: ストリートビューで 9 を押すと手を振り、そのあと 1 も効く
 - **テストの注意(大事)**: 同じプロファイルを使い回すと、manifest の version を上げても、service worker が古い `background.js` のまま動いていることがある(`sw.evaluate(() => typeof reverseGeocode)` が undefined)。新しいメッセージを使う機能を試すときは新しいプロファイルにする。ユーザーにも、更新したら `chrome://extensions` で再読み込みボタンを押してもらう(README に書いた)
 
+## 7回目のセッション(同時に動かす案の検証、1.6.2)
+
+ユーザーの依頼: 6回目で直さなかった「奥行きの推定と椅子などの検出を同時に動かすと速くなる。ただ AI の部品は同時に動かすと壊れるおそれがあるので、順番のままにした」を「検証して」。
+
+- 結論: **速くならない**。transformers.js が推定を `webInferenceChain` で1列に並べているので、`Promise.all` で呼んでも中で順番になる(transformers.js のコメントには「並べないと Error: Session already started になる」とある)。6回目に書いた「同時に動かすと壊れるおそれ」は、試した範囲では起きなかった
+- 測ったもの(localhost のページに transformers.js をそのままバンドル。Times Square の写真を 640px にして、奥行き + 検出を 1 回あたりで):
+
+  | | 順番 | `Promise.all` | ORT の `session.run` を本当に同時 |
+  |---|---|---|---|
+  | WASM(奥行き q8 + 検出 fp32) | 3077ms | 3070ms(結果も同じ) | 3007ms(5 回とも同じ結果、エラーなし) |
+  | WebGPU(SwiftShader、fp32)+ WASM | 63014ms | 61977ms | 60148ms(同上) |
+
+  本当に同時に動かしても速くなるのは 2〜5% だけで、部品が想定していない使い方なので採用しない
+- **見つかった不具合**: 列の中で一度でも失敗すると、あとに並んだものも全部同じエラーで失敗し続ける(読み込みの列も同じ)。1.6.1 で検出モデルを壊れたもの(読み込めるが推定で失敗する)に差し替えると、以後の奥行きは 1 回おきに失敗し(同じ画像でキャッシュした奥行きを使う回だけ成功)、モデルを戻しても直らず、オフスクリーンも作り直されなかった → 1.6.2 で直した(CHANGELOG)
+- 確かめ方(スクラッチパッドのスクリプトは残らないので要点だけ):
+  - 壊れたモデル: Python の `onnx` で、入力 `pixel_values` を `[1, 2, 640, 640]` に固定し、出力 `logits` / `pred_boxes` を ReduceMean だけで作ったモデル(268 バイト、出力にも形を書かないと `onnx.checker` が通らない)。読み込みは通るが、3 チャンネルの画像を入れると ORT の中で「Got invalid dimensions」で失敗する
+  - 差し込み方: service worker で `caches.open('transformers-cache')` に、Hugging Face の URL をキーにして `cache.put` する(検出は `https://huggingface.co/onnx-community/dfine_s_coco-ONNX/resolve/main/onnx/model.onnx`、奥行きの WASM 用は `…/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx`)。拡張の origin のキャッシュなので、オフスクリーンの transformers.js がそれを使う
+  - 推定は `sw.evaluate(() => self.estimateDepth(dataUrl))` で直接呼ぶ。オフスクリーンの数は `chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })`、作り直した回数は `sw.evaluate(() => restartCount)` で見る
+  - 1.6.2 の結果: 検出が壊れていても、奥行きは毎回 OK で作り直しもしない。奥行きが壊れていると、最初の失敗ですぐ作り直し、次は 60 秒あけて作り直す(連打しない)。モデルを戻すと次の推定から OK になり、椅子も見つかり、作り直しの回数は 0 に戻る
+  - 読み込みの列: ありえない実行プロバイダ(`session_options: { executionProviders: ['no-such-backend'] }`)でわざと失敗させたあと、ふつうの読み込みが、4.3.1 のままだと同じエラーで失敗し、書き換えると成功する
+  - ふつうの流れ: 代わりのページ(`ctx.route`)に Times Square の写真を全画面で出し、ストリートビューの URL にすると、奥行き OK → 椅子に座りに行く(「ちょっと休憩しよっか」)
+- WebGPU を試すとき: ヘッドレスの Chromium に `--enable-unsafe-webgpu --use-angle=swiftshader --enable-unsafe-swiftshader` を付けると SwiftShader の WebGPU が使えるが、fp16 が無い(transformers.js が読み込みの前に断るので、拡張では WASM になる)。`navigator.gpu` は安全なコンテキスト(localhost や拡張のページ)にしか無く、about:blank では使えない
+
 ## 次にやること
 
 1. ユーザーの Mac の Chrome で、本物のパノラマの上でアバターの大きさ・足元の位置・隠れ方が自然か見てもらう(ここではサムネイルでしか確認できていない)
 2. 車の後ろに立つ場面などで、隠れ処理の余裕(`z * 1.06 + 0.35`)が距離 7〜8m でも妥当か
 3. 新しいモーション(ピース・おじぎ・回る・見回す・のび)を本物の画面で見てもらい、好みを聞く
-4. 椅子に座る動きを本物の画面で見てもらう。WebGPU のある Mac で、奥行き(WebGPU)と椅子の検出(WASM)を同時に動かしても重くないか。座る位置(椅子の手前の端に腰かける)・向き・座面の高さ(いつも約 0.45m)が自然か
+4. 椅子に座る動きを本物の画面で見てもらう。WebGPU のある Mac で、奥行き(WebGPU)のあとに椅子の検出(WASM)が順番に動いても重くないか。座る位置(椅子の手前の端に腰かける)・向き・座面の高さ(いつも約 0.45m)が自然か
 5. 3Dマップでも座らせたいか聞く(Overpass API からベンチを取ってくる必要がある)
 6. おしゃべりの量・セリフの内容・振り返る頻度が、うるさくないか・物足りなくないか、本物の画面で聞く
 

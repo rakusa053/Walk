@@ -75,10 +75,27 @@ function ensureOffscreen() {
   return offscreenReady;
 }
 
+// オフスクリーンで WASM でも奥行きを推定できなくなったら(ORT ごと壊れたときなど)、ドキュメントを
+// 作り直す(offscreen.js の needsRestart)。ずっと失敗するとき(モデルが壊れているなど)に
+// 作り直し続けないよう、間隔は 30 秒から倍々にのばす(最長 10 分)
+let restartCount = 0;
+let lastRestartAt = 0;
+
+async function restartOffscreen() {
+  const wait = Math.min(10 * 60 * 1000, 30 * 1000 * 2 ** restartCount);
+  if (Date.now() - lastRestartAt < wait) return;
+  restartCount += 1;
+  lastRestartAt = Date.now();
+  offscreenReady = null;
+  await chrome.offscreen.closeDocument().catch(() => {});
+}
+
 // テストで差し替えられるように self に置く
 self.estimateDepth = async (dataUrl) => {
   await ensureOffscreen();
   const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'depth', dataUrl });
+  if (res?.restart) await restartOffscreen();
+  else if (res && !res.error) restartCount = 0; // 元に戻ったら、次の作り直しはまた 30 秒から
   if (!res || res.error) throw new Error(res?.error || '奥行き推定に失敗しました');
   return res.depth;
 };
