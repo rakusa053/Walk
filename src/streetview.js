@@ -55,6 +55,10 @@ const IDLE_BECKON_S = 25; // 立ち止まったままこの秒数たつと「こ
 let ctx = null; // 表示中のオーバーレイ
 let loadingKey = null;
 let talkEnabled = true; // 吹き出しでおしゃべりするか
+// アバターの大きさ(実物大の何倍で描くか)。gmaps.js の「大きさ」ボタンで ×1 / ×1.5 / ×2 を選ぶ(ふつうは ×2。
+// 実物大(1.7m)だと、カメラが高い(2.5m)ので小さく見える)。歩く速さもこの倍率で速くして、足の運びは同じに見せる
+let avatarScale = 2;
+const SIT_MAX_SCALE = 1.25; // これより大きいと、ふつうの椅子には座れない(宙に浮いて座ってしまう)
 // このページで一緒に歩いた距離と、地名(ストリートビューを出たり入ったりしても続ける)
 let walkedM = 0;
 let greeted = false;
@@ -371,6 +375,7 @@ function createOverlay() {
     onStatus: null,
   };
   c.companion.setEnabled(talkEnabled);
+  applyScale(c);
 
   c.onResize = () => {
     renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -552,7 +557,7 @@ function update(c, dt) {
     const dx = home.x - c.at.x;
     const dz = home.z - c.at.z;
     const d = Math.hypot(dx, dz);
-    const step = CATCH_UP_SPEED * dt;
+    const step = CATCH_UP_SPEED * avatarScale * dt;
     if (d <= step) {
       c.at = null;
       c.groundTarget = c.homeGround;
@@ -584,12 +589,12 @@ function update(c, dt) {
   const running = walking && c.running;
   c.lively = forward !== 0 || turning || !!c.emote || !!c.animator?.emote;
   if (c.animator) {
-    c.animator.update(dt, { forward, running, speed: running ? 3.2 : walking ? 1.4 : planSpeed });
+    c.animator.update(dt, { forward, running, speed: running ? 3.2 : walking ? 1.4 : planSpeed / avatarScale });
     c.model.position.y = c.animator.lift;
   } else if (c.mixer) {
     playAction(c, forward ? 'walk' : c.emote || 'idle');
     // 止まるときは、歩きのアニメーションが消えていくあいだも足を動かしたままにする
-    if (c.actions.walk && forward) c.actions.walk.timeScale = walking ? c.walkDir * (running ? 2 : 1) : planSpeed / 1.4;
+    if (c.actions.walk && forward) c.actions.walk.timeScale = walking ? c.walkDir * (running ? 2 : 1) : planSpeed / (1.4 * avatarScale);
     c.mixer.update(dt);
   }
 
@@ -618,10 +623,11 @@ function scissorAroundAvatar(c) {
   const h = window.innerHeight;
   const p = c.spot.position;
   let x0 = w, y0 = h, x1 = 0, y1 = 0;
-  // 手を広げたり跳んだりしても入るよう、横 ±0.9m・高さ 2.4m の箱を画面に写す
-  for (const dx of [-0.9, 0.9]) {
-    for (const dz of [-0.9, 0.9]) {
-      for (const dy of [-0.2, 2.4]) {
+  // 手を広げたり跳んだりしても入るよう、横 ±0.9m・高さ 2.4m(実物大のとき)の箱を画面に写す
+  const r = 0.9 * avatarScale;
+  for (const dx of [-r, r]) {
+    for (const dz of [-r, r]) {
+      for (const dy of [-0.2, 2.4 * avatarScale]) {
         boxVec.set(p.x + dx, p.y + dy, p.z + dz).project(c.camera);
         if (!(Math.abs(boxVec.z) <= 1)) {
           // カメラの後ろなど、うまく写せないときは画面全体
@@ -710,7 +716,7 @@ function updateCompanion(c, dt, walking) {
     a.stopLooking();
   } else if (target === 'camera') {
     const dist = Math.hypot((c.at || c.home).x, (c.at || c.home).z);
-    a.lookAt(yawToward(c, 0, 0), Math.atan2(CAMERA_HEIGHT_M - 1.5, dist));
+    a.lookAt(yawToward(c, 0, 0), Math.atan2(CAMERA_HEIGHT_M - 1.5 * avatarScale, dist));
   } else {
     a.lookAt(yawToward(c, target.x, target.z), 0);
   }
@@ -723,10 +729,10 @@ function bubbleAnchor(c) {
   const head = c.vrm?.humanoid?.getRawBoneNode('head');
   if (head) {
     head.getWorldPosition(anchorVec);
-    anchorVec.y += 0.3;
+    anchorVec.y += 0.3 * avatarScale;
   } else {
     c.spot.getWorldPosition(anchorVec);
-    anchorVec.y += AVATAR_HEIGHT_M + 0.25;
+    anchorVec.y += (AVATAR_HEIGHT_M + 0.25) * avatarScale;
   }
   anchorVec.project(c.camera);
   if (anchorVec.z < -1 || anchorVec.z > 1) return null;
@@ -761,7 +767,7 @@ function updatePlan(c, dt, home) {
     // なければ歩き回る
     const idle = !c.emote && !c.animator?.emote && c.walkTimer <= 0 && t - c.lastActive >= SIT_AFTER_IDLE_S;
     if (!idle) return 0;
-    if (c.animator && c.seats.length && t >= c.seatCooldownUntil) startSeat(c, home);
+    if (c.animator && avatarScale <= SIT_MAX_SCALE && c.seats.length && t >= c.seatCooldownUntil) startSeat(c, home);
     else if (c.field && t >= c.nextPlanAt) startWander(c, home);
     return 0;
   }
@@ -838,14 +844,14 @@ function startSeat(c, home) {
     }
   }
   if (!best) return;
-  startWalk(c, home, 'seat', best, SEAT_WALK_SPEED);
+  startWalk(c, home, 'seat', best, SEAT_WALK_SPEED * avatarScale);
   c.plan.stay = randIn(SIT_STAY_S);
 }
 
 // 写っている平らな地面から行き先を選んで歩く(見つからなければ、少しあとでまた探す)
 function startWander(c, home) {
   const dest = pickWanderTarget(c, home);
-  if (dest) startWalk(c, home, 'wander', dest, WANDER_SPEED);
+  if (dest) startWalk(c, home, 'wander', dest, WANDER_SPEED * avatarScale);
   else c.nextPlanAt = nowS() + 4;
 }
 
@@ -892,7 +898,7 @@ function toScreen(cam, x, y, z) {
 // その場所に立ったアバターが、画面に入るか(足元や頭、横の端が切れない)
 function onScreen(cam, x, ground, z) {
   const feet = toScreen(cam, x, ground, z);
-  const head = toScreen(cam, x, ground + AVATAR_HEIGHT_M + 0.15, z);
+  const head = toScreen(cam, x, ground + (AVATAR_HEIGHT_M + 0.15) * avatarScale, z);
   return !!feet && !!head && feet.v < 0.92 && head.v > 0.08 && Math.abs(feet.u - 0.5) < 0.4;
 }
 
@@ -1203,6 +1209,17 @@ export function hide() {
 export function setTalk(on) {
   talkEnabled = on;
   ctx?.companion.setEnabled(on);
+}
+
+// アバターの大きさ(gmaps.js の「大きさ」ボタン)
+export function setScale(scale) {
+  avatarScale = scale;
+  if (ctx) applyScale(ctx);
+}
+
+function applyScale(c) {
+  c.spot.scale.setScalar(avatarScale); // アバターと影
+  if (avatarScale > SIT_MAX_SCALE && c.plan?.kind === 'seat') cancelPlan(c); // 大きくしたら椅子から立つ
 }
 
 // テスト用

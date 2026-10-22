@@ -23,11 +23,18 @@
   talkBtn.type = 'button';
   talkBtn.className = 'walk3d-talk';
 
-  bar.append(avatarBtn, talkBtn, walkBtn);
+  // アバターの大きさ(押すたびに ×1 → ×1.5 → ×2。ふつうは ×2)
+  const SCALES = [1, 1.5, 2];
+  const sizeBtn = document.createElement('button');
+  sizeBtn.type = 'button';
+  sizeBtn.className = 'walk3d-size';
+
+  bar.append(avatarBtn, talkBtn, sizeBtn, walkBtn);
   document.documentElement.appendChild(bar);
 
   let enabled = true;
   let talk = true;
+  let scale = 2;
   let modelKey = 'girl';
   let sv = null; // 読み込んだストリートビュー用モジュール
   let loading = null;
@@ -66,6 +73,8 @@
     talkBtn.innerHTML = '<span class="walk3d-icon">💬</span>';
     talkBtn.classList.toggle('off', !talk);
     talkBtn.title = talk ? 'おしゃべり ON(吹き出しで話しかけます)' : 'おしゃべり OFF';
+    sizeBtn.textContent = `大きさ ×${scale}`;
+    sizeBtn.title = 'アバターの大きさ(押すたびに ×1 → ×1.5 → ×2)。椅子に座るのは ×1 のときだけです';
   }
 
   function onStatus(status, message = '') {
@@ -85,6 +94,7 @@
     if (!loading) loading = import(chrome.runtime.getURL('build/streetview.js'));
     sv = await loading;
     sv.setTalk(talk);
+    sv.setScale(scale);
     return sv;
   }
 
@@ -111,6 +121,13 @@
     render();
   });
 
+  sizeBtn.addEventListener('click', () => {
+    scale = SCALES[(SCALES.indexOf(scale) + 1) % SCALES.length];
+    chrome.storage.local.set({ svScale: scale });
+    sv?.setScale(scale);
+    render();
+  });
+
   avatarBtn.addEventListener('click', () => {
     enabled = !enabled;
     chrome.storage.local.set({ svAvatar: enabled });
@@ -120,10 +137,11 @@
   });
 
   chrome.storage.local
-    .get(['svAvatar', 'walkState', 'talk'])
-    .then(({ svAvatar, walkState, talk: savedTalk }) => {
+    .get(['svAvatar', 'walkState', 'talk', 'svScale'])
+    .then(({ svAvatar, walkState, talk: savedTalk, svScale }) => {
       enabled = svAvatar !== false;
       talk = savedTalk !== false;
+      if (SCALES.includes(svScale)) scale = svScale;
       if (walkState?.model) modelKey = walkState.model;
     })
     .finally(() => {
@@ -137,6 +155,11 @@
     if (changes.talk) {
       talk = changes.talk.newValue !== false;
       sv?.setTalk(talk);
+      render();
+    }
+    if (SCALES.includes(changes.svScale?.newValue)) {
+      scale = changes.svScale.newValue;
+      sv?.setScale(scale);
       render();
     }
     const next = changes.walkState?.newValue?.model;

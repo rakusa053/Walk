@@ -13,7 +13,8 @@
   bottom: auto;
 }
 #walk3d-buttons:not(.streetview) .walk3d-toggle,
-#walk3d-buttons:not(.streetview) .walk3d-talk { display: none; }
+#walk3d-buttons:not(.streetview) .walk3d-talk,
+#walk3d-buttons:not(.streetview) .walk3d-size { display: none; }
 #walk3d-buttons button {
   display: flex;
   align-items: center;
@@ -32,6 +33,7 @@
 #walk3d-buttons button.walk3d-toggle.off { background: #5f6368; }
 #walk3d-buttons button.walk3d-talk { background: #f29d38; padding: 10px 12px; }
 #walk3d-buttons button.walk3d-talk.off { background: #5f6368; opacity: .8; }
+#walk3d-buttons button.walk3d-size { background: #8e5bd6; padding: 10px 14px; }
 #walk3d-buttons .walk3d-icon { font-size: 16px; }
 .walk3d-dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; opacity: .6; }
 .walk3d-dot.loading { background: #fbbc04; opacity: 1; animation: walk3d-pulse 1s infinite alternate; }
