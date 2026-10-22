@@ -114,6 +114,12 @@ async function reverseGeocode(lat, lng, lang) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // オフスクリーンがしばらく使われなかった(offscreen.js)。メモリを返すために閉じる。次の推定で作り直す
+  if (msg?.type === 'offscreen-idle') {
+    offscreenReady = null;
+    chrome.offscreen.closeDocument().catch(() => {});
+    return false;
+  }
   if (msg?.type === 'reverse-geocode') {
     reverseGeocode(msg.lat, msg.lng, msg.lang)
       .then((address) => sendResponse({ address }))

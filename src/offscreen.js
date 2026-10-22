@@ -145,10 +145,30 @@ async function estimateDepth(estimator, image) {
   return { width: ow, height: oh, data: out };
 }
 
+// しばらく使われなかったら(ストリートビューを出たあとなど)、AI のモデルが使っているメモリ(約 300MB)を
+// 返すため、background にこのドキュメントを閉じてもらう。次に使うときに作り直す(モデルはブラウザに
+// 保存してあるので、読み込みは数秒)
+const IDLE_CLOSE_MS = 5 * 60 * 1000;
+let busy = 0;
+let idleTimer = 0;
+function waitIdle() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (busy) waitIdle();
+    else chrome.runtime.sendMessage({ type: 'offscreen-idle' }).catch(() => {});
+  }, IDLE_CLOSE_MS);
+}
+waitIdle();
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== 'offscreen' || msg.type !== 'depth') return false;
+  busy += 1;
   estimate(msg.dataUrl, msg.noWebGPU)
     .then((depth) => sendResponse({ depth, noWebGPU: !useWebGPU }))
-    .catch((e) => sendResponse({ error: String(e?.message || e), restart: !!e?.restart, noWebGPU: !useWebGPU }));
+    .catch((e) => sendResponse({ error: String(e?.message || e), restart: !!e?.restart, noWebGPU: !useWebGPU }))
+    .finally(() => {
+      busy -= 1;
+      waitIdle();
+    });
   return true;
 });

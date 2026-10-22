@@ -67,10 +67,17 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 // ---------------------------------------------------------------------------
 // 奥行きを深度バッファに書き込む全画面パス
 // ---------------------------------------------------------------------------
+function placeholderDepth() {
+  const tex = new THREE.DataTexture(new Uint16Array([THREE.DataUtils.toHalfFloat(FAR)]), 1, 1, THREE.RedFormat, THREE.HalfFloatType);
+  tex.needsUpdate = true;
+  return tex;
+}
+
 function createDepthOccluder() {
   const material = new THREE.ShaderMaterial({
     uniforms: {
-      depthTex: { value: null },
+      // 奥行きが来るまでは 1 画素の仮のもの(同じ形式にしておくと、本物が来たときに描く準備をし直さない)
+      depthTex: { value: placeholderDepth() },
       near: { value: NEAR },
       far: { value: FAR },
     },
@@ -282,6 +289,7 @@ function createOverlay() {
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
   renderer.setClearColor(0x000000, 0);
+  renderer.setScissorTest(true); // アバターのまわりだけ描く(scissorAroundAvatar)
 
   const scene = new THREE.Scene();
   scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 2.4));
@@ -353,6 +361,8 @@ function createOverlay() {
     walkTimer: 0,
     walkDir: 1,
     lag: 0,
+    lively: true, // 歩く・向きを変えるなど、動いているか(描く回数を決める)
+    ready: false, // アバターのシェーダーができたか(できるまでは描かない)
     emote: null,
     raf: 0,
     last: performance.now(),
@@ -390,11 +400,14 @@ function createOverlay() {
   window.addEventListener('keydown', c.onKeyDown, true);
 
   c.tick = (t) => {
+    c.raf = requestAnimationFrame(c.tick);
+    maybeEstimateDepth(c);
+    // 描くのは、歩いたり向きを変えたりしているときでも 1 秒に 60 回まで(120Hz の画面では半分)、
+    // 立ち止まっているときは 30 回(息や髪の揺れくらいなので十分)。描かないフレームは前の絵のまま
+    if (t - c.last < (c.lively ? 1000 / 60 : 1000 / 30) - 2) return;
     const dt = Math.min(0.1, (t - c.last) / 1000);
     c.last = t;
     update(c, dt);
-    maybeEstimateDepth(c);
-    c.raf = requestAnimationFrame(c.tick);
   };
   c.raf = requestAnimationFrame(c.tick);
   return c;
@@ -414,6 +427,17 @@ function setModel(c, gltf) {
   const { wrapper, model, vrm } = normalizeModel(gltf, AVATAR_HEIGHT_M);
   c.model = wrapper;
   c.root.add(wrapper);
+  // シェーダーは、ページを止めないように別に作らせて、できてから描く(作りながら描くと、初めて表示したときと、
+  // 初めて奥行きで隠したときに、ページ全体が 0.2〜0.3 秒止まっていた)。隠れ処理のシェーダーもいっしょに作る
+  c.ready = false;
+  c.renderer
+    .compileAsync(c.scene, c.camera)
+    .catch(() => {})
+    .finally(() => {
+      if (c.model !== wrapper) return;
+      warmUp(c);
+      c.ready = true;
+    });
 
   if (vrm) {
     c.vrm = vrm;
@@ -531,6 +555,7 @@ function update(c, dt) {
   const at = c.at || home;
   const faceCamera = FACE_CAMERA.has(c.animator?.emote);
   const yawTarget = c.plan ? c.plan.yaw : faceCamera ? Math.atan2(-at.x, -at.z) : Math.PI + c.lag;
+  const turning = Math.abs(angleDiffRad(c.yaw, yawTarget)) > 0.05;
   c.yaw += angleDiffRad(c.yaw, yawTarget) * Math.min(1, dt * 8);
   c.root.rotation.y = c.yaw;
 
@@ -542,6 +567,7 @@ function update(c, dt) {
 
   const forward = walking ? c.walkDir : planSpeed > 0 ? 1 : 0;
   const running = walking && c.running;
+  c.lively = forward !== 0 || turning || !!c.emote || !!c.animator?.emote;
   if (c.animator) {
     c.animator.update(dt, { forward, running, speed: running ? 3.2 : walking ? 1.4 : planSpeed });
     c.model.position.y = c.animator.lift;
@@ -552,8 +578,55 @@ function update(c, dt) {
     c.mixer.update(dt);
   }
 
+  if (c.ready) {
+    scissorAroundAvatar(c);
+    c.renderer.render(c.scene, c.camera);
+  }
+  c.companion.update(c.ready ? bubbleAnchor(c) : null);
+}
+
+// 初めて描くときは、シェーダーのほかにも描き方ごとの準備があって止まるので、表示する前に 1 画素だけ描いて
+// 済ませておく。隠れ処理もここで一度描く(初めて奥行きが来たときに止まらないように)
+function warmUp(c) {
+  const occluderVisible = c.occluder.visible;
+  c.occluder.visible = true;
+  c.renderer.setScissor(0, 0, 1, 1);
   c.renderer.render(c.scene, c.camera);
-  c.companion.update(bubbleAnchor(c));
+  c.occluder.visible = occluderVisible;
+}
+
+// 描くのはアバターのまわりだけにする。画面全体に奥行きを書き込むのは重い(とくに Retina の画面)。
+// 描かないところは、ブラウザが毎フレーム透明に戻す(preserveDrawingBuffer: false)
+const boxVec = new THREE.Vector3();
+function scissorAroundAvatar(c) {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const p = c.spot.position;
+  let x0 = w, y0 = h, x1 = 0, y1 = 0;
+  // 手を広げたり跳んだりしても入るよう、横 ±0.9m・高さ 2.4m の箱を画面に写す
+  for (const dx of [-0.9, 0.9]) {
+    for (const dz of [-0.9, 0.9]) {
+      for (const dy of [-0.2, 2.4]) {
+        boxVec.set(p.x + dx, p.y + dy, p.z + dz).project(c.camera);
+        if (!(Math.abs(boxVec.z) <= 1)) {
+          // カメラの後ろなど、うまく写せないときは画面全体
+          c.renderer.setScissor(0, 0, w, h);
+          return;
+        }
+        const sx = ((boxVec.x + 1) / 2) * w;
+        const sy = ((boxVec.y + 1) / 2) * h; // WebGL なので下から
+        x0 = Math.min(x0, sx);
+        x1 = Math.max(x1, sx);
+        y0 = Math.min(y0, sy);
+        y1 = Math.max(y1, sy);
+      }
+    }
+  }
+  x0 = Math.max(0, Math.floor(x0) - 8);
+  y0 = Math.max(0, Math.floor(y0) - 8);
+  x1 = Math.min(w, Math.ceil(x1) + 8);
+  y1 = Math.min(h, Math.ceil(y1) + 8);
+  c.renderer.setScissor(x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0));
 }
 
 // ---------------------------------------------------------------------------
