@@ -5,12 +5,13 @@
 //  - 手前にある建物や人の後ろにアバターを隠す
 //  - 坂道や階段ではアバターを地面の高さに合わせる
 //  - 椅子やベンチが写っていたら、そこまで歩いていって座る
+//  - 立ち止まっているあいだは、写っている平らな地面を歩き回る
 // ようにしている。また、一緒に散歩している感じが出るように、ときどき振り返ったり、
 // 吹き出しで話しかけたり(companion.js)、立ち止まっていると手招きしたりする。
 // 奥行きは「足元は平らな地面」という前提で実際の距離(m)に換算する。
 import * as THREE from 'three';
 import { builtinModelUrl, createLoader, disposeVrm, findClip, normalizeModel } from './avatar-model.js';
-import { VrmAnimator } from './vrm-animator.js';
+import { FACE_CAMERA, VrmAnimator } from './vrm-animator.js';
 import { AreaWatcher, Companion, formatDistance, greetingKey, passedMilestone } from './companion.js';
 
 const AVATAR_HEIGHT_M = 1.7;
@@ -33,6 +34,14 @@ const SEAT_WALK_SPEED = 1.1; // m/s
 const SIT_AFTER_IDLE_S = 2; // 操作がなくなって(視点が止まって)からこの秒数たったら座りに行く
 const SEAT_COOLDOWN_S = 10; // キー操作で立たせたあと、また座りに行くまでの秒数
 const SIT_ANGLE = 0.45; // 座るときの向き(カメラの方向から少しずらす)[rad]
+const SIT_STAY_S = [30, 60]; // 座ってから、自分で立ってまた歩き回るまで
+const SEAT_AGAIN_S = 45; // 自分で立ったあと、また座りに行くまで
+// 立ち止まっているあいだ、まわりを歩き回る(奥行きから、写っている平らな地面だけを選んで歩く)
+const WANDER_SPEED = 0.85; // m/s(座りに行くより少しゆっくり)
+const WANDER_LEG_M = [1.5, 7]; // 1 回に歩く距離
+const WANDER_PAUSE_S = [3, 8]; // 着いてから、次に歩き出すまで
+const WANDER_START_S = [2.5, 5]; // 操作がなくなってから歩き出すまで(椅子に座りに行くのは SIT_AFTER_IDLE_S)
+const WANDER_FORWARD = [0.75, 1.8]; // 行き先の前方の距離(いつもの位置までの距離に対する割合)
 // 一緒に散歩している感じ
 // 画面の真ん中ではなく、中心から右端までの 25% のところを歩く(となりを一歩先に歩いている感じ。
 // 横長の画面で約 1.5m 右)。m で決めると、ズームしたとき画面の外に出てしまう
@@ -306,7 +315,9 @@ function createOverlay() {
     homeGround: 0, // いつもの位置(画面の中央)の地面の高さ
     seats: [], // いまの視点で見つかった、座れる場所
     seatRetries: 0,
-    plan: null, // 座りに行く途中・座っているときの予定
+    plan: null, // 座りに行く・歩き回るときの予定 { kind: 'seat' | 'wander', dest, phase, … }
+    nextPlanAt: 0, // この時刻(秒)までは、歩き回る行き先を探さない
+    field: null, // いまの視点の奥行き(歩ける場所を探すのに使う)
     at: null, // いつもの位置以外にいるときの位置 {x, z}
     yaw: Math.PI, // アバターの向き(+Z 向きのモデルを奥へ向けると π)
     lastActive: nowS(), // 最後に操作した時刻(秒)。フレームが遅くても実際の時間で数える
@@ -339,7 +350,7 @@ function createOverlay() {
     renderer.setSize(window.innerWidth, window.innerHeight, false);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    invalidateDepth(c);
+    invalidateDepth(c, true);
   };
   window.addEventListener('resize', c.onResize);
   c.onResize();
@@ -438,12 +449,12 @@ const EMOTE_KEYS = {
 function triggerEmote(c, name) {
   // ロボット(GLB)に、その動きのアニメーションが無いときは何もしない(c.emote が残って戻らなくなる)
   if (!c.animator && !c.actions[name]) return;
-  cancelSeat(c, false); // 座っていたら、その場で立ってから
+  cancelPlan(c); // 座っていたら、その場で立ってから。歩き回っていたら止まる
   c.walkTimer = 0;
   c.emote = name;
   c.companion.say(name, {}, { priority: 2, cooldown: 4 });
   if (c.animator) {
-    c.animator.startEmote(name);
+    c.animator.startEmote(name, false);
   } else if (c.actions[name] && c.current === c.actions[name]) {
     c.actions[name].reset().play();
   }
@@ -495,32 +506,34 @@ function update(c, dt) {
   const walking = c.walkTimer > 0;
   c.walkTimer = Math.max(0, c.walkTimer - dt);
   if (walking && c.emote) stopEmote(c);
-  if (walking) cancelSeat(c, false); // 歩き出したら立ち上がる
+  if (walking) cancelPlan(c); // 歩き出したら立ち上がる・歩き回るのをやめる(いまの位置のまま一緒に歩く)
 
-  // 椅子に向かって歩く・座る
-  const seatForward = updateSeat(c, dt, home);
+  // 椅子に向かって歩く・座る・まわりを歩き回る
+  const planSpeed = updatePlan(c, dt, home);
 
-  // カメラを回したとき、アバターが少し遅れて向きを合わせる(+Z 向きのモデルを奥へ向ける)
+  // カメラを回したとき、アバターが少し遅れて向きを合わせる(+Z 向きのモデルを奥へ向ける)。
+  // 振り返るエモート(ピース・おじぎ・手招き)のあいだは、体ごとこちらを向く
   c.lag *= Math.exp(-dt * 4);
-  const yawTarget = c.plan ? c.plan.yaw : Math.PI + c.lag;
+  const at = c.at || home;
+  const faceCamera = FACE_CAMERA.has(c.animator?.emote);
+  const yawTarget = c.plan ? c.plan.yaw : faceCamera ? Math.atan2(-at.x, -at.z) : Math.PI + c.lag;
   c.yaw += angleDiffRad(c.yaw, yawTarget) * Math.min(1, dt * 8);
   c.root.rotation.y = c.yaw;
 
   // 地面の高さへなめらかに移動
   c.ground += (c.groundTarget - c.ground) * Math.min(1, dt * 5);
-  const at = c.at || home;
   c.spot.position.set(at.x, c.ground, at.z);
 
   updateCompanion(c, dt, walking);
 
-  const forward = walking ? c.walkDir : seatForward;
+  const forward = walking ? c.walkDir : planSpeed > 0 ? 1 : 0;
   const running = walking && c.running;
   if (c.animator) {
-    c.animator.update(dt, { forward, running, speed: running ? 3.2 : walking ? 1.4 : SEAT_WALK_SPEED });
+    c.animator.update(dt, { forward, running, speed: running ? 3.2 : walking ? 1.4 : planSpeed });
     c.model.position.y = c.animator.lift;
   } else if (c.mixer) {
-    playAction(c, walking ? 'walk' : c.emote || 'idle');
-    if (c.actions.walk) c.actions.walk.timeScale = c.walkDir * (running ? 2 : 1);
+    playAction(c, forward ? 'walk' : c.emote || 'idle');
+    if (c.actions.walk) c.actions.walk.timeScale = walking ? c.walkDir * (running ? 2 : 1) : planSpeed / 1.4;
     c.mixer.update(dt);
   }
 
@@ -565,10 +578,12 @@ function updateCompanion(c, dt, walking) {
     c.nextLookBack = 8 + Math.random() * 8;
   }
 
-  // 立ち止まったままだと「こっちこっち」(VRM だけ。座っているとき・エモート中はしない)
-  if (a && !c.beckoned && !c.plan && !c.emote && !a.emote && nowS() - c.stillSince > IDLE_BECKON_S) {
+  // 立ち止まったままだと「こっちこっち」(VRM だけ。座っているとき・歩き回って歩いているとき・エモート中はしない)
+  const resting = !c.plan || c.plan.phase === 'pause';
+  if (a && !c.beckoned && resting && !c.emote && !a.emote && nowS() - c.stillSince > IDLE_BECKON_S) {
     c.beckoned = true;
-    a.startEmote('beckon');
+    c.plan = null; // 歩き回る途中で止まっていたら、その予定はやめて振り返る
+    a.startEmote('beckon', false);
     c.companion.say('idle', {}, { cooldown: 60, queue: true });
   }
 
@@ -587,7 +602,7 @@ function updateCompanion(c, dt, walking) {
   a.talking = c.companion.talking;
   // 話しているときは、こちらを向く(物を見ているときはそちら)
   let target = nowS() < c.lookUntil ? c.lookTarget : null;
-  if (!target && c.companion.talking && !c.plan) target = 'camera';
+  if (!target && c.companion.talking && resting) target = 'camera';
   if (!target) {
     a.stopLooking();
   } else if (target === 'camera') {
@@ -634,45 +649,81 @@ function noticeThings(c) {
 }
 
 // ---------------------------------------------------------------------------
-// 椅子・ベンチに座る(見つけたら歩いていって、こちらを向いて座る)
+// 椅子・ベンチに座る(見つけたら歩いていって、こちらを向いて座る)・まわりを歩き回る
 // ---------------------------------------------------------------------------
-// 戻り値は、歩いているとき 1
-function updateSeat(c, dt, home) {
+const randIn = ([a, b]) => a + Math.random() * (b - a);
+
+// 予定(座りに行く・歩き回る)を進める。戻り値は、歩いているときの速さ[m/s](止まっているときは 0)
+function updatePlan(c, dt, home) {
   const plan = c.plan;
+  const t = nowS();
   if (!plan) {
-    // VRM(女の子)だけ。ロボットには座るアニメーションがない
-    const idle = c.animator && !c.emote && !c.animator.emote && c.walkTimer <= 0;
-    const t = nowS();
-    if (idle && c.seats.length && t >= c.seatCooldownUntil && t - c.lastActive >= SIT_AFTER_IDLE_S) startSeat(c, home);
+    // 操作がなくなってしばらくしたら、椅子があれば座りに行き(VRM だけ。ロボットには座るアニメーションがない)、
+    // なければ歩き回る
+    const idle = !c.emote && !c.animator?.emote && c.walkTimer <= 0 && t - c.lastActive >= SIT_AFTER_IDLE_S;
+    if (!idle) return 0;
+    if (c.animator && c.seats.length && t >= c.seatCooldownUntil) startSeat(c, home);
+    else if (c.field && t >= c.nextPlanAt) startWander(c, home);
     return 0;
   }
-  const { seat } = plan;
   if (plan.phase === 'walk') {
+    const { dest } = plan;
     const cur = c.at || home;
-    const dx = seat.x - cur.x;
-    const dz = seat.z - cur.z;
+    const dx = dest.x - cur.x;
+    const dz = dest.z - cur.z;
     const d = Math.hypot(dx, dz);
-    const step = SEAT_WALK_SPEED * dt;
+    const step = plan.speed * dt;
     if (d <= Math.max(step, 0.02)) {
-      c.at = { x: seat.x, z: seat.z };
-      plan.phase = 'turn';
-      // カメラのほうを向く。真正面だと太ももが縮んで見えて座っているように見えにくいので、少し斜めに
-      plan.yaw = Math.atan2(-seat.x, -seat.z) + SIT_ANGLE;
+      c.at = { x: dest.x, z: dest.z };
+      arrive(c, plan);
     } else {
       c.at = { x: cur.x + (dx / d) * step, z: cur.z + (dz / d) * step };
       plan.yaw = Math.atan2(dx, dz);
     }
-    const done = 1 - Math.min(1, Math.hypot(seat.x - c.at.x, seat.z - c.at.z) / plan.length);
-    c.groundTarget = lerp(plan.ground0, seat.ground, done);
-    return plan.phase === 'walk' ? 1 : 0;
+    const done = 1 - Math.min(1, Math.hypot(dest.x - c.at.x, dest.z - c.at.z) / plan.length);
+    c.groundTarget = lerp(plan.ground0, dest.ground, done);
+    return plan.phase === 'walk' ? plan.speed : 0;
   }
   if (plan.phase === 'turn' && Math.abs(angleDiffRad(c.yaw, plan.yaw)) < 0.15) {
     plan.phase = 'sit';
     c.animator?.setSitting(true);
-    c.sitSince = nowS();
+    c.sitSince = t;
     c.companion.say('sit', {}, { cooldown: 60 });
+  } else if (plan.phase === 'sit' && t - c.sitSince > plan.stay) {
+    // しばらく座ったら、自分で立って、また歩き回る
+    cancelPlan(c);
+    c.seatCooldownUntil = t + SEAT_AGAIN_S;
+  } else if (plan.phase === 'pause' && t >= plan.until) {
+    c.plan = null; // 次の行き先を探す
   }
   return 0;
+}
+
+// 行き先に着いたとき。椅子ならこちらを向いて座る。歩き回っているときは、こちらを向いたり景色を眺めたりして少し止まる
+function arrive(c, plan) {
+  const facingCamera = Math.atan2(-plan.dest.x, -plan.dest.z);
+  if (plan.kind === 'seat') {
+    plan.phase = 'turn';
+    // 真正面だと太ももが縮んで見えて座っているように見えにくいので、少し斜めに
+    plan.yaw = facingCamera + SIT_ANGLE;
+    return;
+  }
+  plan.phase = 'pause';
+  plan.until = nowS() + randIn(WANDER_PAUSE_S);
+  const r = Math.random();
+  if (r < 0.35) {
+    plan.yaw = facingCamera;
+  } else {
+    plan.yaw = Math.PI + (Math.random() * 2 - 1) * 1.3;
+    if (r > 0.8) c.animator?.startEmote('lookaround');
+  }
+}
+
+function startWalk(c, home, kind, dest, speed) {
+  const cur = c.at || home;
+  c.at = { x: cur.x, z: cur.z };
+  const length = Math.max(0.01, Math.hypot(dest.x - cur.x, dest.z - cur.z));
+  c.plan = { kind, dest, phase: 'walk', speed, yaw: c.yaw, length, ground0: c.groundTarget };
 }
 
 // いまの位置から一番近い椅子へ向かう
@@ -688,20 +739,123 @@ function startSeat(c, home) {
     }
   }
   if (!best) return;
-  c.at = { x: cur.x, z: cur.z };
-  c.plan = { seat: best, phase: 'walk', yaw: c.yaw, length: Math.max(0.01, bestDist), ground0: c.groundTarget };
+  startWalk(c, home, 'seat', best, SEAT_WALK_SPEED);
+  c.plan.stay = randIn(SIT_STAY_S);
 }
 
-// 座るのをやめて立つ。reset なら(視点が変わったとき)いつもの位置へすぐ戻る
-function cancelSeat(c, reset) {
-  c.lastActive = nowS();
-  if (c.plan?.phase === 'sit' && !reset) c.companion.say('stand', {}, { cooldown: 30 });
-  if (c.plan) {
-    c.plan = null;
-    c.animator?.setSitting(false, reset);
-    c.seatCooldownUntil = reset ? 0 : nowS() + SEAT_COOLDOWN_S;
+// 写っている平らな地面から行き先を選んで歩く(見つからなければ、少しあとでまた探す)
+function startWander(c, home) {
+  const dest = pickWanderTarget(c, home);
+  if (dest) startWalk(c, home, 'wander', dest, WANDER_SPEED);
+  else c.nextPlanAt = nowS() + 4;
+}
+
+// 行き先を選ぶ。画面の下半分の、前方の距離が WANDER_FORWARD の範囲に写っている点から選ぶ
+// (場所を適当に選ぶと、狭い路地では壁の中ばかりになる)。ときどき、いつもの位置(斜め前)に戻ってくる
+function pickWanderTarget(c, home) {
+  const { field } = c;
+  const { metric, w, h, cam } = field;
+  const cur = c.at || home;
+  const candidates = Math.random() < 0.3 ? [home] : [];
+  const far = toScreen(cam, 0, 0, -WANDER_FORWARD[1] * cam.dist);
+  const near = toScreen(cam, 0, 0, -WANDER_FORWARD[0] * cam.dist);
+  for (let k = 0; far && near && far.v < 0.95 && k < 30; k++) {
+    const i = Math.floor((0.1 + Math.random() * 0.8) * w);
+    const j = Math.min(h - 1, Math.floor(lerp(Math.max(0, far.v), Math.min(0.95, near.v), Math.random()) * h));
+    const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
+    const d = metric[j * w + i];
+    candidates.push({ x: r.x * d, z: r.z * d });
   }
-  if (reset && c.at) {
+  for (const { x, z } of candidates) {
+    const d = Math.hypot(x - cur.x, z - cur.z);
+    if (d < WANDER_LEG_M[0] || d > WANDER_LEG_M[1] || -z > WANDER_FORWARD[1] * cam.dist) continue;
+    const ground = groundAt(field, x, z);
+    if (ground !== null && onScreen(cam, x, ground, z) && pathClear(field, cur, { x, z })) return { x, z, ground };
+  }
+  return null;
+}
+
+// カメラのまわりの点 (x, y, z)[m](y は足元の地面からの高さ)が、画面のどこに写るか。
+// u, v は画面の左上を 0、右下を 1 とした位置、d はカメラからの奥行き。カメラの後ろなら null(rayFor の逆)
+function toScreen(cam, x, y, z) {
+  const p = toRad(cam.pitch);
+  const dy = y - CAMERA_HEIGHT_M;
+  const d = dy * Math.sin(p) - z * Math.cos(p);
+  if (d < 0.1) return null;
+  const tanV = Math.tan(toRad(cam.fov) / 2);
+  const ys = (dy * Math.cos(p) + z * Math.sin(p)) / d;
+  return { u: (x / d / (tanV * cam.aspect) + 1) / 2, v: (1 - ys / tanV) / 2, d };
+}
+
+// その場所に立ったアバターが、画面に入るか(足元や頭、横の端が切れない)
+function onScreen(cam, x, ground, z) {
+  const feet = toScreen(cam, x, ground, z);
+  const head = toScreen(cam, x, ground + AVATAR_HEIGHT_M + 0.15, z);
+  return !!feet && !!head && feet.v < 0.92 && head.v > 0.08 && Math.abs(feet.u - 0.5) < 0.4;
+}
+
+// (x, z) のまわり(半径 0.5m)の地面の高さ。手前の物に隠れて見えないときや、
+// 人・車・柱などが立っていて平らな地面ではないときは null
+function groundAt(field, x, z) {
+  const { metric, w, h, cam } = field;
+  // 地面の高さが -1.2〜+1m のどこにあっても入るよう、その範囲が写るところを調べる
+  let u0 = 1, u1 = 0, v0 = 1, v1 = 0;
+  for (const dx of [-0.5, 0.5]) {
+    for (const dz of [-0.5, 0.5]) {
+      for (const y of [-1.2, 1]) {
+        const s = toScreen(cam, x + dx, y, z + dz);
+        if (!s) return null;
+        u0 = Math.min(u0, s.u);
+        u1 = Math.max(u1, s.u);
+        v0 = Math.min(v0, s.v);
+        v1 = Math.max(v1, s.v);
+      }
+    }
+  }
+  const ys = [];
+  for (let j = Math.max(0, Math.floor(v0 * h)); j <= Math.min(h - 1, Math.floor(v1 * h)); j++) {
+    for (let i = Math.max(0, Math.floor(u0 * w)); i <= Math.min(w - 1, Math.floor(u1 * w)); i++) {
+      const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
+      const d = metric[j * w + i];
+      if (Math.hypot(r.x * d - x, r.z * d - z) <= 0.5) ys.push(CAMERA_HEIGHT_M + r.y * d);
+    }
+  }
+  if (ys.length < 6) return null;
+  ys.sort((p, q) => p - q);
+  const ground = ys[Math.floor(ys.length * 0.2)];
+  if (ys[Math.floor(ys.length * 0.8)] - ground > 0.3 || Math.abs(ground) > 1.2) return null;
+  return ground;
+}
+
+// from から to まで、まっすぐ歩けるか(途中の地面が見えていて、段差がない)。
+// 歩き出すところ(0.9m 以内)は、座っていた椅子などがあるので調べない
+function pathClear(field, from, to) {
+  const len = Math.hypot(to.x - from.x, to.z - from.z);
+  let prev = null;
+  for (let s = 0.9; s < len + 0.35; s += 0.7) {
+    const k = Math.min(1, s / len);
+    const g = groundAt(field, lerp(from.x, to.x, k), lerp(from.z, to.z, k));
+    if (g === null || (prev !== null && Math.abs(g - prev) > 0.3)) return false;
+    prev = g;
+  }
+  return true;
+}
+
+// 座る・歩き回るのをやめる。reset なら(視点が変わったとき)すぐに立つ。
+// home ならいつもの位置へすぐ戻る(invalidateDepth)。それ以外は、いまの位置のまま
+function cancelPlan(c, { reset = false, home = false } = {}) {
+  c.lastActive = nowS();
+  c.nextPlanAt = c.lastActive + randIn(WANDER_START_S);
+  const plan = c.plan;
+  if (plan?.phase === 'sit' && !reset) c.companion.say('stand', {}, { cooldown: 30 });
+  if (plan) {
+    c.plan = null;
+    if (plan.kind === 'seat') {
+      c.animator?.setSitting(false, reset);
+      c.seatCooldownUntil = reset ? 0 : nowS() + SEAT_COOLDOWN_S;
+    }
+  }
+  if (home && c.at) {
     c.at = null;
     c.groundTarget = c.homeGround;
     c.yaw = Math.PI + c.lag;
@@ -716,17 +870,20 @@ function viewKeyOf(view) {
   return [view.lat, view.lng, view.heading, view.tilt, view.fov].map((v) => (v ?? 0).toFixed(5)).join(',');
 }
 
-function invalidateDepth(c) {
+// home なら(画角や画面の大きさが変わった・大きく向きを変えたとき)いつもの位置へ戻る。それ以外(前に進んだ・
+// 少し回した)は、いまの位置のまま一緒に歩く(画面の中の同じところにいる)
+function invalidateDepth(c, home) {
   c.occluder.visible = false;
   c.depthKey = '';
   c.blankTries = 0;
   c.viewChangedAt = performance.now();
-  // 見つけていた椅子の位置も使えなくなるので、座っていたらいつもの位置に戻る
+  // 見つけていた椅子や歩ける場所も使えなくなるので、座っていたら立ち、歩き回るのもやめる
+  c.field = null;
   c.seats = [];
   c.things = [];
   c.seatRetries = 0;
   c.retryShot = null;
-  cancelSeat(c, true);
+  cancelPlan(c, { reset: true, home });
 }
 
 async function maybeEstimateDepth(c) {
@@ -803,8 +960,21 @@ function applyDepth(c, depth, cam) {
   if (old) old.dispose();
   c.occluder.material.uniforms.depthTex.value = field.tex;
   c.occluder.visible = true;
+  c.field = { metric: field.metric, w: field.w, h: field.h, cam };
   c.homeGround = field.ground;
-  if (!c.at) c.groundTarget = field.ground;
+  if (!c.at) {
+    c.groundTarget = field.ground;
+  } else if (!c.plan) {
+    // 歩き回ったところにいるときは、そこの地面の高さにする。進んだり回したりして、そこが壁の向こうなどに
+    // なって見えない・画面の外のときは、いつもの位置に戻る(見えないので、移っても目立たない)
+    const g = groundAt(c.field, c.at.x, c.at.z);
+    if (g !== null && onScreen(cam, c.at.x, g, c.at.z)) {
+      c.groundTarget = g;
+    } else {
+      c.at = null;
+      c.groundTarget = field.ground;
+    }
+  }
   c.seats = findSeats(field, depth.seats, cam);
   c.things = (depth.things || []).flatMap((t) => {
     const at = locateSeat(field, cam, t.box);
@@ -824,7 +994,10 @@ export function updateView(view) {
   const key = viewKeyOf(view);
   if (key !== ctx.viewKey) {
     ctx.viewKey = key;
-    invalidateDepth(ctx); // 視点が変わったら古い奥行きは使えない
+    // 視点が変わったら古い奥行きは使えない。画角が変わった・大きく向きを変えたときは、画面の同じところに
+    // いても、そこに写る物がまったく変わるので、いつもの位置に戻る(前に進んだだけなら、いまの位置のまま)
+    const turned = Math.abs(angleDiff(prev?.heading ?? 0, view.heading ?? 0)) > 20;
+    invalidateDepth(ctx, !prev || prev.fov !== view.fov || turned);
   }
   if (!prev) return;
 
@@ -910,4 +1083,4 @@ export function setTalk(on) {
 }
 
 // テスト用
-export const _internal = { buildDepthField, findSeats, rayFor, CAMERA_HEIGHT_M };
+export const _internal = { buildDepthField, findSeats, rayFor, toScreen, groundAt, pathClear, CAMERA_HEIGHT_M };

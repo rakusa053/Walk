@@ -9,7 +9,7 @@ const EMOTE_DURATION = {
   peace: 2.6, bow: 2.6, spin: 1.3, lookaround: 3.4, stretch: 2.6, beckon: 2.6,
 };
 // こちら(カメラ側)を向いてから行うエモート。ふだんは後ろ姿なので、振り返って見せる
-const FACE_CAMERA = new Set(['peace', 'bow', 'beckon']);
+export const FACE_CAMERA = new Set(['peace', 'bow', 'beckon']);
 // しばらく立ち止まっていると、自分から行う動き
 const IDLE_EMOTES = ['lookaround', 'stretch'];
 
@@ -41,6 +41,7 @@ export class VrmAnimator {
     this.emote = null;
     this.emoteTime = 0;
     this.emoteWeight = 0;
+    this.emoteTurn = true; // 振り返るエモートで、腰を半回転させるか
     this.lift = 0;
     this.nextBlink = 2;
     this.blinkTime = -1;
@@ -88,9 +89,12 @@ export class VrmAnimator {
     return a.distanceTo(b);
   }
 
-  startEmote(name) {
+  // turn: ピース・おじぎ・手招きで、腰を半回転させて振り返るか。ストリートビューでは、歩き回っていて
+  // こちらを向いていることもあるので、腰は回さずに体ごとカメラのほうへ向ける(false)
+  startEmote(name, turn = true) {
     this.emote = name;
     this.emoteTime = 0;
+    this.emoteTurn = turn;
     this.sitting = false; // エモートは立ってから
   }
 
@@ -376,7 +380,7 @@ export class VrmAnimator {
       headRot[0] -= this.lookPitch * lkw;
     }
     // 振り返るエモートは、体ごとカメラのほうを向く
-    if (FACE_CAMERA.has(this.emote)) hipsRot[1] += Math.PI * this.poseWeight(et, 0);
+    if (this.emoteTurn && FACE_CAMERA.has(this.emote)) hipsRot[1] += Math.PI * this.poseWeight(et, 0);
     hipsRot[1] += this.spin;
 
     if (b.hips) b.hips.position.y = hipsY;
