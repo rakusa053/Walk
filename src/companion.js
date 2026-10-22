@@ -101,15 +101,16 @@ export class Companion {
 
   // key の中からひとつ選んで言う。priority が高いと、いま出ている低いものを上書きする。
   // queue なら、いま言えないとき(別のことを言っている・前のおしゃべりから間がない)は、前の吹き出しが
-  // 消えてから言う(犬がいた・走った など、そのときのことなので、7 秒の間隔は待たない)
-  say(key, vars = {}, { priority = 1, cooldown = 30, queue = false } = {}, ignoreGap = false) {
+  // 消えてから言う(犬がいた・走った など、そのときのことなので、7 秒の間隔は待たない)。
+  // onSaid は、吹き出しに出たとき(待ってから出たときも)に呼ぶ
+  say(key, vars = {}, { priority = 1, cooldown = 30, queue = false, onSaid = null } = {}, ignoreGap = false) {
     if (!this.enabled || !LINES[key]) return false;
     const t = now();
     if (t - (this.lastSaid[key] ?? -Infinity) < cooldown) return false;
     const showing = t < this.until;
     const tooSoon = !ignoreGap && priority < 2 && t - this.lastAny < MIN_GAP_S;
     if ((showing && priority <= this.priority) || (!showing && tooSoon)) {
-      if (queue) this.enqueue({ key, vars, priority, cooldown, expires: t + 15 });
+      if (queue) this.enqueue({ key, vars, priority, cooldown, onSaid, expires: t + 15 });
       return false;
     }
     const choices = LINES[key].filter((s) => s !== this.lastText[key]);
@@ -123,6 +124,7 @@ export class Companion {
     this.lastSaid[key] = t;
     this.lastText[key] = pick;
     this.lastAny = t;
+    onSaid?.();
     return true;
   }
 
@@ -141,7 +143,7 @@ export class Companion {
       // 待っていたものは、ふつうの間隔の決まりは気にせずに言う
       while (this.pending.length) {
         const p = this.pending.shift();
-        if (this.say(p.key, p.vars, { priority: p.priority, cooldown: p.cooldown }, true)) break;
+        if (this.say(p.key, p.vars, { priority: p.priority, cooldown: p.cooldown, onSaid: p.onSaid }, true)) break;
       }
     }
     const visible = this.enabled && anchor && t < this.until;
@@ -195,8 +197,9 @@ export class AreaWatcher {
     this.last = null; // いまの地名 {name, city}
   }
 
-  // say(key, vars) で一言(言わないときは呼ばない)。返事が来る前にストリートビューを出たり
-  // おしゃべりを OFF にしたりして言えなかったら、say は false を返す(地名を覚えずに、次にまた調べる)
+  // say(key, vars, onSaid) で一言(言わないときは呼ばない)。吹き出しに出たら onSaid を呼んでもらい、そこで地名を覚える。
+  // 出なかったら(返事が来る前や、待っているあいだにストリートビューを出た・おしゃべりを OFF にした)、
+  // 覚えずに、次にまた調べる
   check(lat, lng, say) {
     if (this.busy || !Number.isFinite(lat) || !Number.isFinite(lng) || now() - this.time < GEO_INTERVAL_S) return;
     if (this.at) {
@@ -214,14 +217,22 @@ export class AreaWatcher {
         const area = areaName(res?.address);
         if (!area?.name) return;
         const prev = this.last;
-        let said = true;
-        if (!prev) said = say('areaStart', { name: area.name });
+        let line = null;
+        if (!prev) line = ['areaStart', { name: area.name }];
         else if (area.name !== prev.name) {
-          if (area.city && prev.city && area.city !== prev.city) said = say('areaCity', { name: area.name, city: area.city });
-          else said = say('area', { name: area.name });
+          line = area.city && prev.city && area.city !== prev.city
+            ? ['areaCity', { name: area.name, city: area.city }]
+            : ['area', { name: area.name }];
         }
-        if (said === false) this.at = null;
-        else this.last = area;
+        if (!line) {
+          this.last = area;
+          return;
+        }
+        this.at = null; // 吹き出しに出るまでは、また調べてよい
+        say(...line, () => {
+          this.last = area;
+          this.at = { lat, lng };
+        });
       })
       .catch((e) => console.warn('[Walk 3D] 地名を調べられませんでした', e))
       .finally(() => {

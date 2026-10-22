@@ -80,7 +80,6 @@ function ensureOffscreen() {
 // 作り直し続けないよう、間隔は 30 秒から倍々にのばす(最長 10 分)
 let restartCount = 0;
 let lastRestartAt = 0;
-let noWebGPU = false; // WebGPU で失敗していたら、作り直したドキュメントでも WASM で推定してもらう
 
 async function restartOffscreen() {
   const wait = Math.min(10 * 60 * 1000, 30 * 1000 * 2 ** restartCount);
@@ -94,8 +93,11 @@ async function restartOffscreen() {
 // テストで差し替えられるように self に置く
 self.estimateDepth = async (dataUrl) => {
   await ensureOffscreen();
+  // WebGPU で失敗していたら、作り直したドキュメントでも WASM で推定してもらう。service worker が
+  // 止まっても忘れないよう、ブラウザを閉じるまで chrome.storage.session に覚えておく
+  const { noWebGPU = false } = await chrome.storage.session.get('noWebGPU');
   const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'depth', dataUrl, noWebGPU });
-  if (res?.noWebGPU) noWebGPU = true;
+  if (res?.noWebGPU && !noWebGPU) await chrome.storage.session.set({ noWebGPU: true });
   if (res?.restart) await restartOffscreen();
   if (!res || res.error) throw new Error(res?.error || '奥行き推定に失敗しました');
   if (!res.depth.blank) restartCount = 0; // 推定できたら、次の作り直しはまた 30 秒から

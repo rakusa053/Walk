@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Walk 3D - アバターと3Dマップを歩こう",
   "short_name": "Walk 3D",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Googleマップのような3Dマップの街並みを、3Dモデルのアバターと一緒に歩けます。",
   "icons": {
     "16": "icons/icon16.png",

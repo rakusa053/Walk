@@ -184,6 +184,19 @@ function buildDepthField(depth, cam) {
     const den = data[k] - fit.b;
     metric[k] = den > 1e-6 ? Math.min(FAR, Math.max(NEAR, fit.a / den)) : FAR;
   }
+  // 各点の、カメラのまわりの位置[m](y は足元の地面からの高さ)。歩ける場所を探すのに使う
+  const px = new Float32Array(w * h);
+  const py = new Float32Array(w * h);
+  const pz = new Float32Array(w * h);
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const k = j * w + i;
+      const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
+      px[k] = r.x * metric[k];
+      py[k] = CAMERA_HEIGHT_M + r.y * metric[k];
+      pz[k] = r.z * metric[k];
+    }
+  }
 
   // アバターが立つ位置(画面のやや右)の縦の帯で、アバターの距離あたりにある点の高さを集める。
   // 足元の地面が画面の外(下)にあるときは、手前の車などを地面と取り違えるので集めない
@@ -217,7 +230,7 @@ function buildDepthField(depth, cam) {
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
-  return { tex, ground, metric, w, h };
+  return { tex, ground, metric, px, py, pz, w, h };
 }
 
 // 検出した椅子・ベンチの枠を、奥行きを使ってカメラのまわりの位置[m]にする(画面の右が +x、奥が -z)
@@ -317,6 +330,7 @@ function createOverlay() {
     seatRetries: 0,
     plan: null, // 座りに行く・歩き回るときの予定 { kind: 'seat' | 'wander', dest, phase, … }
     nextPlanAt: 0, // この時刻(秒)までは、歩き回る行き先を探さない
+    turned: 0, // 最後に奥行きで位置を確かめてから、視点の向きを変えた角度の合計[°]
     field: null, // いまの視点の奥行き(歩ける場所を探すのに使う)
     at: null, // いつもの位置以外にいるときの位置 {x, z}
     yaw: Math.PI, // アバターの向き(+Z 向きのモデルを奥へ向けると π)
@@ -533,7 +547,8 @@ function update(c, dt) {
     c.model.position.y = c.animator.lift;
   } else if (c.mixer) {
     playAction(c, forward ? 'walk' : c.emote || 'idle');
-    if (c.actions.walk) c.actions.walk.timeScale = walking ? c.walkDir * (running ? 2 : 1) : planSpeed / 1.4;
+    // 止まるときは、歩きのアニメーションが消えていくあいだも足を動かしたままにする
+    if (c.actions.walk && forward) c.actions.walk.timeScale = walking ? c.walkDir * (running ? 2 : 1) : planSpeed / 1.4;
     c.mixer.update(dt);
   }
 
@@ -633,11 +648,7 @@ function bubbleAnchor(c) {
 // 地名が変わったら「〇〇に来たね」(調べる間隔は AreaWatcher が守る)
 function checkArea(view) {
   if (!talkEnabled) return;
-  areaWatcher.check(view?.lat, view?.lng, (key, vars) => {
-    if (!ctx?.companion.enabled) return false;
-    ctx.companion.say(key, vars, { priority: 2, cooldown: 0, queue: true });
-    return true;
-  });
+  areaWatcher.check(view?.lat, view?.lng, (key, vars, onSaid) => ctx?.companion.say(key, vars, { priority: 2, cooldown: 0, queue: true, onSaid }));
 }
 
 // 写真に写っている犬・猫などを話題にして、そちらを見る(別のことを話している間なら、そのあとで言う)
@@ -754,7 +765,7 @@ function startWander(c, home) {
 // (場所を適当に選ぶと、狭い路地では壁の中ばかりになる)。ときどき、いつもの位置(斜め前)に戻ってくる
 function pickWanderTarget(c, home) {
   const { field } = c;
-  const { metric, w, h, cam } = field;
+  const { px, pz, w, h, cam } = field;
   const cur = c.at || home;
   const candidates = Math.random() < 0.3 ? [home] : [];
   const far = toScreen(cam, 0, 0, -WANDER_FORWARD[1] * cam.dist);
@@ -762,9 +773,7 @@ function pickWanderTarget(c, home) {
   for (let k = 0; far && near && far.v < 0.95 && k < 30; k++) {
     const i = Math.floor((0.1 + Math.random() * 0.8) * w);
     const j = Math.min(h - 1, Math.floor(lerp(Math.max(0, far.v), Math.min(0.95, near.v), Math.random()) * h));
-    const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
-    const d = metric[j * w + i];
-    candidates.push({ x: r.x * d, z: r.z * d });
+    candidates.push({ x: px[j * w + i], z: pz[j * w + i] });
   }
   for (const { x, z } of candidates) {
     const d = Math.hypot(x - cur.x, z - cur.z);
@@ -797,7 +806,7 @@ function onScreen(cam, x, ground, z) {
 // (x, z) のまわり(半径 0.5m)の地面の高さ。手前の物に隠れて見えないときや、
 // 人・車・柱などが立っていて平らな地面ではないときは null
 function groundAt(field, x, z) {
-  const { metric, w, h, cam } = field;
+  const { px, py, pz, w, h, cam } = field;
   // 地面の高さが -1.2〜+1m のどこにあっても入るよう、その範囲が写るところを調べる
   let u0 = 1, u1 = 0, v0 = 1, v1 = 0;
   for (const dx of [-0.5, 0.5]) {
@@ -815,9 +824,10 @@ function groundAt(field, x, z) {
   const ys = [];
   for (let j = Math.max(0, Math.floor(v0 * h)); j <= Math.min(h - 1, Math.floor(v1 * h)); j++) {
     for (let i = Math.max(0, Math.floor(u0 * w)); i <= Math.min(w - 1, Math.floor(u1 * w)); i++) {
-      const r = rayFor((i + 0.5) / w, (j + 0.5) / h, cam);
-      const d = metric[j * w + i];
-      if (Math.hypot(r.x * d - x, r.z * d - z) <= 0.5) ys.push(CAMERA_HEIGHT_M + r.y * d);
+      const k = j * w + i;
+      const dx = px[k] - x;
+      const dz = pz[k] - z;
+      if (dx * dx + dz * dz <= 0.25) ys.push(py[k]);
     }
   }
   if (ys.length < 6) return null;
@@ -841,25 +851,29 @@ function pathClear(field, from, to) {
   return true;
 }
 
-// 座る・歩き回るのをやめる。reset なら(視点が変わったとき)すぐに立つ。
-// home ならいつもの位置へすぐ戻る(invalidateDepth)。それ以外は、いまの位置のまま
+// 座る・歩き回るのをやめる。reset なら(視点が変わったとき)、新しい視点ですぐまた座りに行けるようにする。
+// home ならいつもの位置へすぐ戻る(座っていたら、すぐ立った姿で)。それ以外は、いまの位置のまま(その場で立ち上がる)
 function cancelPlan(c, { reset = false, home = false } = {}) {
   c.lastActive = nowS();
   c.nextPlanAt = c.lastActive + randIn(WANDER_START_S);
   const plan = c.plan;
-  if (plan?.phase === 'sit' && !reset) c.companion.say('stand', {}, { cooldown: 30 });
+  if (plan?.phase === 'sit' && !home) c.companion.say('stand', {}, { cooldown: 30 });
   if (plan) {
     c.plan = null;
     if (plan.kind === 'seat') {
-      c.animator?.setSitting(false, reset);
+      c.animator?.setSitting(false, home);
       c.seatCooldownUntil = reset ? 0 : nowS() + SEAT_COOLDOWN_S;
     }
   }
-  if (home && c.at) {
-    c.at = null;
-    c.groundTarget = c.homeGround;
-    c.yaw = Math.PI + c.lag;
-  }
+  if (home) goHome(c);
+}
+
+// いつもの位置(斜め前)へすぐ戻る
+function goHome(c) {
+  if (!c.at) return;
+  c.at = null;
+  c.groundTarget = c.homeGround;
+  c.yaw = Math.PI + c.lag;
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +957,7 @@ async function maybeEstimateDepth(c) {
     c.depthFailed += 1;
     c.depthKey = '';
     c.viewChangedAt = performance.now() + 2000 * c.depthFailed; // 少し待ってから再挑戦
+    if (!c.plan) goHome(c); // 歩き回ったところが見えているか確かめられないので、いつもの位置に戻る
     console.warn('[Walk 3D] 奥行き推定に失敗しました', e);
     c.onStatus?.('error', String(e?.message || e));
   } finally {
@@ -953,6 +968,7 @@ async function maybeEstimateDepth(c) {
 function applyDepth(c, depth, cam) {
   const field = buildDepthField(depth, cam);
   if (!field) {
+    if (!c.plan) goHome(c); // 歩き回ったところが見えているか確かめられないので、いつもの位置に戻る
     c.onStatus?.('error', '地面が見つかりませんでした');
     return;
   }
@@ -960,7 +976,7 @@ function applyDepth(c, depth, cam) {
   if (old) old.dispose();
   c.occluder.material.uniforms.depthTex.value = field.tex;
   c.occluder.visible = true;
-  c.field = { metric: field.metric, w: field.w, h: field.h, cam };
+  c.field = { px: field.px, py: field.py, pz: field.pz, w: field.w, h: field.h, cam };
   c.homeGround = field.ground;
   if (!c.at) {
     c.groundTarget = field.ground;
@@ -968,13 +984,10 @@ function applyDepth(c, depth, cam) {
     // 歩き回ったところにいるときは、そこの地面の高さにする。進んだり回したりして、そこが壁の向こうなどに
     // なって見えない・画面の外のときは、いつもの位置に戻る(見えないので、移っても目立たない)
     const g = groundAt(c.field, c.at.x, c.at.z);
-    if (g !== null && onScreen(cam, c.at.x, g, c.at.z)) {
-      c.groundTarget = g;
-    } else {
-      c.at = null;
-      c.groundTarget = field.ground;
-    }
+    if (g !== null && onScreen(cam, c.at.x, g, c.at.z)) c.groundTarget = g;
+    else goHome(c);
   }
+  c.turned = 0;
   c.seats = findSeats(field, depth.seats, cam);
   c.things = (depth.things || []).flatMap((t) => {
     const at = locateSeat(field, cam, t.box);
@@ -994,10 +1007,13 @@ export function updateView(view) {
   const key = viewKeyOf(view);
   if (key !== ctx.viewKey) {
     ctx.viewKey = key;
-    // 視点が変わったら古い奥行きは使えない。画角が変わった・大きく向きを変えたときは、画面の同じところに
-    // いても、そこに写る物がまったく変わるので、いつもの位置に戻る(前に進んだだけなら、いまの位置のまま)
-    const turned = Math.abs(angleDiff(prev?.heading ?? 0, view.heading ?? 0)) > 20;
-    invalidateDepth(ctx, !prev || prev.fov !== view.fov || turned);
+    // 視点が変わったら古い奥行きは使えない。画角が変わった・大きく向きを変えた(最後に奥行きで位置を
+    // 確かめてから、少しずつでも合わせて 20° より)ときは、画面の同じところにいても、そこに写る物が
+    // まったく変わるので、いつもの位置に戻る(前に進んだだけなら、いまの位置のまま)
+    ctx.turned += Math.abs(angleDiff(prev?.heading ?? 0, view.heading ?? 0));
+    const home = !prev || prev.fov !== view.fov || ctx.turned > 20;
+    if (home) ctx.turned = 0;
+    invalidateDepth(ctx, home);
   }
   if (!prev) return;
 
