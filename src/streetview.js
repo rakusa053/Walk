@@ -16,9 +16,10 @@ import { AreaWatcher, Companion, formatDistance, greetingKey, passedMilestone } 
 
 const AVATAR_HEIGHT_M = 1.7;
 const CAMERA_HEIGHT_M = 2.5; // ストリートビューのカメラの高さ(撮影車のおおよその値)
-// アバターまでの距離は、水平に見たとき足元が画面の中心から下端までの 8 割の位置に来るように決める
-// (URL の画角は横なので、横長の画面ほど縦の画角が狭くなり、近いと足が画面の外に出る)
-const FEET_ON_SCREEN = 0.8;
+// アバターまでの距離は、水平に見たとき足元が、画面の中心から下端までの 1.15 倍の位置(下端より少し下)に
+// 来るように決める。一緒に歩いている感じが出るよう、すぐ前を歩く(足先は画面の下で切れる。1.7.2 までは
+// 0.8 倍で、全身が見えるが遠かった)。URL の画角は横なので、横長の画面ほど縦の画角が狭くなり、足が画面から出やすい
+const FEET_ON_SCREEN = 1.15;
 const MIN_DIST_M = 4;
 // ズームする(画角を狭める)と遠くに置かないと足が画面の下に出るので、上限は大きめにする
 // (横 15° までズームしても足元が画面に入る。見た目の大きさはズームしても変わらない)
@@ -41,10 +42,11 @@ const WANDER_SPEED = 0.85; // m/s(座りに行くより少しゆっくり)
 const WANDER_LEG_M = [1.5, 7]; // 1 回に歩く距離
 const WANDER_PAUSE_S = [3, 8]; // 着いてから、次に歩き出すまで
 const WANDER_START_S = [2.5, 5]; // 操作がなくなってから歩き出すまで(椅子に座りに行くのは SIT_AFTER_IDLE_S)
-const WANDER_FORWARD = [0.75, 1.8]; // 行き先の前方の距離(いつもの位置までの距離に対する割合)
+const WANDER_FORWARD = [0.75, 2.4]; // 行き先の前方の距離(いつもの位置までの距離に対する割合)
+const CATCH_UP_SPEED = 1.6; // 一緒に歩き出したとき、いつもの位置へ戻ってくる速さ[m/s]
 // 一緒に散歩している感じ
 // 画面の真ん中ではなく、中心から右端までの 25% のところを歩く(となりを一歩先に歩いている感じ。
-// 横長の画面で約 1.5m 右)。m で決めると、ズームしたとき画面の外に出てしまう
+// 横長の画面で約 1m 右)。m で決めると、ズームしたとき画面の外に出てしまう
 const SIDE_FRACTION = 0.25;
 const LOOK_BACK_EVERY_S = [12, 25]; // 歩いているあいだ、この間隔でときどき振り返る
 const LOOK_BACK_S = 1.6; // 振り返っている時間
@@ -237,7 +239,7 @@ function buildDepthField(depth, cam) {
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
-  return { tex, ground, metric, px, py, pz, w, h };
+  return { tex, ground, feetVisible, metric, px, py, pz, w, h };
 }
 
 // 検出した椅子・ベンチの枠を、奥行きを使ってカメラのまわりの位置[m]にする(画面の右が +x、奥が -z)
@@ -544,7 +546,20 @@ function update(c, dt) {
   const walking = c.walkTimer > 0;
   c.walkTimer = Math.max(0, c.walkTimer - dt);
   if (walking && c.emote) stopEmote(c);
-  if (walking) cancelPlan(c); // 歩き出したら立ち上がる・歩き回るのをやめる(いまの位置のまま一緒に歩く)
+  if (walking) cancelPlan(c); // 歩き出したら立ち上がる・歩き回るのをやめる
+  // 一緒に歩き出したら、歩き回って離れていても、いつもの位置(すぐ斜め前)へ戻ってくる(立ち上がってから)
+  if (walking && c.at && !(c.animator?.sitWeight > 0.2)) {
+    const dx = home.x - c.at.x;
+    const dz = home.z - c.at.z;
+    const d = Math.hypot(dx, dz);
+    const step = CATCH_UP_SPEED * dt;
+    if (d <= step) {
+      c.at = null;
+      c.groundTarget = c.homeGround;
+    } else {
+      c.at = { x: c.at.x + (dx / d) * step, z: c.at.z + (dz / d) * step };
+    }
+  }
 
   // 椅子に向かって歩く・座る・まわりを歩き回る
   const planSpeed = updatePlan(c, dt, home);
@@ -840,7 +855,12 @@ function pickWanderTarget(c, home) {
   const { field } = c;
   const { px, pz, w, h, cam } = field;
   const cur = c.at || home;
-  const candidates = Math.random() < 0.3 ? [home] : [];
+  // 離れているときは半分くらい、いつもの位置(すぐ斜め前)へ戻ってくる。そこは足元が画面の外なので地面を
+  // 確かめられないが、カメラのすぐ前(撮影した車がいた道)なので歩けることにする
+  if (c.at && Math.hypot(home.x - cur.x, home.z - cur.z) > WANDER_LEG_M[0] && Math.random() < 0.5 && pathClear(field, cur, home)) {
+    return { x: home.x, z: home.z, ground: c.homeGround };
+  }
+  const candidates = [];
   const far = toScreen(cam, 0, 0, -WANDER_FORWARD[1] * cam.dist);
   const near = toScreen(cam, 0, 0, -WANDER_FORWARD[0] * cam.dist);
   for (let k = 0; far && near && far.v < 0.95 && k < 30; k++) {
@@ -910,6 +930,15 @@ function groundAt(field, x, z) {
   return ground;
 }
 
+// (x, z) から奥へ少しずつ離れて、最初に見つかった地面の高さ(足元が画面の外のとき用)。見つからなければ null
+function groundAhead(field, x, z) {
+  for (let k = 0.5; k <= 3; k += 0.5) {
+    const g = groundAt(field, x, z - k);
+    if (g !== null) return g;
+  }
+  return null;
+}
+
 // from から to まで、まっすぐ歩けるか(途中の地面が見えていて、段差がない)。
 // 歩き出すところ(0.9m 以内)は、座っていた椅子などがあるので調べない
 function pathClear(field, from, to) {
@@ -917,7 +946,11 @@ function pathClear(field, from, to) {
   let prev = null;
   for (let s = 0.9; s < len + 0.35; s += 0.7) {
     const k = Math.min(1, s / len);
-    const g = groundAt(field, lerp(from.x, to.x, k), lerp(from.z, to.z, k));
+    const x = lerp(from.x, to.x, k);
+    const z = lerp(from.z, to.z, k);
+    // 画面の下(カメラのすぐ前)は見えないが、撮影した車がいた道なので歩けることにする
+    if (toScreen(field.cam, x, 0, z)?.v > 1) continue;
+    const g = groundAt(field, x, z);
     if (g === null || (prev !== null && Math.abs(g - prev) > 0.3)) return false;
     prev = g;
   }
@@ -1050,9 +1083,10 @@ function applyDepth(c, depth, cam) {
   c.occluder.material.uniforms.depthTex.value = field.tex;
   c.occluder.visible = true;
   c.field = { px: field.px, py: field.py, pz: field.pz, w: field.w, h: field.h, cam };
-  c.homeGround = field.ground;
+  // いつもの位置の足元が画面の外のとき(ふだんはそう)は、少し先の地面の高さを使う(坂で沈んだり浮いたりしない)
+  c.homeGround = field.feetVisible ? field.ground : groundAhead(c.field, cam.side, -cam.dist) ?? 0;
   if (!c.at) {
-    c.groundTarget = field.ground;
+    c.groundTarget = c.homeGround;
   } else if (!c.plan) {
     // 歩き回ったところにいるときは、そこの地面の高さにする。進んだり回したりして、そこが壁の向こうなどに
     // なって見えない・画面の外のときは、いつもの位置に戻る(見えないので、移っても目立たない)
